@@ -100,10 +100,29 @@ pub struct QueryRequest {
     pub columns: Vec<ResultColumn>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseExecutionContext {
+    /// Optional actor identity associated with a mutating database execution.
+    ///
+    /// DatabaseContracts stays deliberately agnostic of cache implementations. Consumers such
+    /// as database plugins may use this context for post-commit side effects owned by the plugin.
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+impl DatabaseExecutionContext {
+    #[must_use]
+    pub fn for_actor(actor: impl Into<String>) -> Self {
+        Self { actor: Some(actor.into()) }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExecuteRequest {
     pub statement: String,
     pub parameters: Vec<DatabaseParameter>,
+    #[serde(default)]
+    pub context: DatabaseExecutionContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,6 +209,34 @@ impl std::error::Error for DatabaseError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_context_can_carry_an_actor_without_database_specific_knowledge() {
+        let context = DatabaseExecutionContext::for_actor("user-1");
+
+        assert_eq!(context.actor.as_deref(), Some("user-1"));
+        assert_eq!(DatabaseExecutionContext::default().actor, None);
+    }
+
+    #[test]
+    fn execution_context_without_actor_deserializes_for_backward_compatibility() {
+        let context: DatabaseExecutionContext = serde_json::from_str("{}").expect(
+            "an omitted actor must remain valid for backwards-compatible request decoding"
+        );
+
+        assert_eq!(context, DatabaseExecutionContext::default());
+    }
+
+    #[test]
+    fn execute_request_defaults_to_an_empty_execution_context() {
+        let request = ExecuteRequest {
+            statement: "SELECT 1".to_owned(),
+            parameters: Vec::new(),
+            ..Default::default()
+        };
+
+        assert_eq!(request.context, DatabaseExecutionContext::default());
+    }
 
     #[test]
     fn row_lookup_preserves_the_typed_value() {
