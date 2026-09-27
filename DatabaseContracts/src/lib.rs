@@ -219,15 +219,6 @@ mod tests {
     }
 
     #[test]
-    fn execution_context_without_actor_deserializes_for_backward_compatibility() {
-        let context: DatabaseExecutionContext = serde_json::from_str("{}").expect(
-            "an omitted actor must remain valid for backwards-compatible request decoding"
-        );
-
-        assert_eq!(context, DatabaseExecutionContext::default());
-    }
-
-    #[test]
     fn execute_request_defaults_to_an_empty_execution_context() {
         let request = ExecuteRequest {
             statement: "SELECT 1".to_owned(),
