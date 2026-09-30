@@ -114,6 +114,12 @@ impl AbiBuffer {
         if self.ptr.is_null() {
             return;
         }
+        if self.len == 0 && self.capacity == 0 {
+            return;
+        }
+        if self.len > self.capacity || self.capacity > MAX_ABI_BUFFER_BYTES {
+            return;
+        }
         let _ = unsafe { Vec::from_raw_parts(self.ptr, 0, self.capacity) };
     }
 }
