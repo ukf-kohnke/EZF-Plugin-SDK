@@ -1,0 +1,9 @@
+[package]
+name = "PluginAbi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable C-compatible ABI primitives for EZF backend plugins"
+
+[lib]
+crate-type = ["rlib"]
