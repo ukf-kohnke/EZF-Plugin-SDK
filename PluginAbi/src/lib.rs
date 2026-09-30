@@ -1,5 +1,5 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
-
+#![allow(non_snake_case)]
 use std::ffi::c_void;
 
 /// Stable ABI version for dynamically loaded backend plugins.
@@ -98,9 +98,7 @@ impl AbiBuffer {
         if self.len == 0 {
             return Some(Vec::new());
         }
-        if self.len > MAX_ABI_BUFFER_BYTES
-            || self.len > self.capacity
-            || self.ptr.is_null() {
+        if self.len > MAX_ABI_BUFFER_BYTES || self.len > self.capacity || self.ptr.is_null() {
             return None;
         }
         let bytes = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
@@ -120,41 +118,38 @@ impl AbiBuffer {
     }
 }
 
-pub type PluginLogFnV1 = unsafe extern "C" fn(
-    level: u8,
-    message: AbiSlice,
-);
+pub type PluginLogFnV1 = unsafe extern "C" fn(level: u8, message: AbiSlice);
 
 pub type PluginDatabaseExecuteFnV1 = unsafe extern "C" fn(
     request: AbiSlice,
-    response_out: *mut AbiBuffer,
+    response_out: *mut AbiBuffer
 ) -> i32;
 
 pub type PluginFreeBufferFnV1 = unsafe extern "C" fn(buffer: AbiBuffer);
 pub type PluginNameFnV1 = unsafe extern "C" fn(
     context: *mut c_void,
-    response_out: *mut AbiBuffer,
+    response_out: *mut AbiBuffer
 ) -> i32;
 pub type PluginManifestFnV1 = unsafe extern "C" fn(
     context: *mut c_void,
-    response_out: *mut AbiBuffer,
+    response_out: *mut AbiBuffer
 ) -> i32;
 pub type PluginLoadFnV1 = unsafe extern "C" fn(context: *mut c_void) -> i32;
 pub type PluginLoadedFnV1 = unsafe extern "C" fn(context: *mut c_void) -> i32;
 pub type PluginEndpointFnV1 = unsafe extern "C" fn(
     context: *mut c_void,
     request: AbiSlice,
-    response_out: *mut AbiBuffer,
+    response_out: *mut AbiBuffer
 ) -> i32;
 pub type PluginDatabaseFnV1 = unsafe extern "C" fn(
     context: *mut c_void,
     request: AbiSlice,
-    response_out: *mut AbiBuffer,
+    response_out: *mut AbiBuffer
 ) -> i32;
 pub type PluginSessionClosedFnV1 = unsafe extern "C" fn(
     context: *mut c_void,
     request: AbiSlice,
-    response_out: *mut AbiBuffer,
+    response_out: *mut AbiBuffer
 ) -> i32;
 pub type PluginDestroyFnV1 = unsafe extern "C" fn(instance: *mut PluginInstanceV1) -> i32;
 
@@ -179,7 +174,7 @@ impl PluginHostServicesV1 {
         logger: PluginLogFnV1,
         database: Option<PluginDatabaseExecuteFnV1>,
         database_free: Option<PluginFreeBufferFnV1>,
-        plugin_directory: AbiSlice,
+        plugin_directory: AbiSlice
     ) -> Self {
         Self {
             abi_version: PLUGIN_ABI_VERSION_V1,
@@ -192,8 +187,8 @@ impl PluginHostServicesV1 {
     }
 
     pub const fn is_compatible(&self) -> bool {
-        self.abi_version == PLUGIN_ABI_VERSION_V1
-            && self.struct_size >= std::mem::size_of::<Self>() as u32
+        self.abi_version == PLUGIN_ABI_VERSION_V1 &&
+            self.struct_size >= (std::mem::size_of::<Self>() as u32)
     }
 }
 
@@ -225,8 +220,8 @@ pub struct PluginVTableV1 {
 
 impl PluginVTableV1 {
     pub const fn is_compatible(&self) -> bool {
-        self.abi_version == PLUGIN_ABI_VERSION_V1
-            && self.struct_size >= std::mem::size_of::<Self>() as u32
+        self.abi_version == PLUGIN_ABI_VERSION_V1 &&
+            self.struct_size >= (std::mem::size_of::<Self>() as u32)
     }
 }
 
@@ -250,7 +245,7 @@ impl PluginInstanceV1 {
 
 /// Constructor function exported by a plugin library for ABI v1.
 pub type PluginCreateFnV1 = unsafe extern "C" fn(
-    host_services: *const PluginHostServicesV1,
+    host_services: *const PluginHostServicesV1
 ) -> *mut PluginInstanceV1;
 
 #[cfg(test)]
@@ -260,20 +255,15 @@ mod tests {
     #[test]
     fn buffer_roundtrip_is_allocator_neutral() {
         let buffer = AbiBuffer::from_vec(b"hello".to_vec());
-        let copied = unsafe { buffer.to_vec() }.expect("buffer must be readable");
+        let copied = (unsafe { buffer.to_vec() }).expect("buffer must be readable");
         assert_eq!(copied, b"hello");
-        unsafe { buffer.free() };
+        unsafe { buffer.free() }
     }
 
     #[test]
     fn host_services_are_pointer_sized_and_versioned() {
         let size = std::mem::size_of::<PluginHostServicesV1>();
-        let host = PluginHostServicesV1::new(
-            dummy_log,
-            None,
-            None,
-            AbiSlice::EMPTY,
-        );
+        let host = PluginHostServicesV1::new(dummy_log, None, None, AbiSlice::EMPTY);
         assert_eq!(host.abi_version, PLUGIN_ABI_VERSION_V1);
         assert_eq!(host.struct_size as usize, size);
         assert!(host.is_compatible());

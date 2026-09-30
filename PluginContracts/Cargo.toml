@@ -1,0 +1,15 @@
+[package]
+name = "PluginContracts"
+version = "3.4.1"
+edition = "2024"
+authors = ["Anselm Hoppmann <anselm.hoppmann@uniklinik-freiburg.de>", "Georg Kohnke <georg.kohnke@uniklinik-freiburg.de>", "Frederik Voigt <frederik.voigt@uniklinik-freiburg.de>", "Jonas Gassenschmidt <jonas.gassenschmidt@uniklinik-freiburg.de>"]
+description = "Rust-side plugin SDK and logical plugin contracts"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hoppmann/EZF-Backend.git"
+
+[dependencies]
+DatabaseContracts = { path = "../DatabaseContracts" }
+PluginAbi = { path = "../PluginAbi" }
+log = "0.4.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
