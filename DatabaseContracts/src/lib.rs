@@ -100,29 +100,10 @@ pub struct QueryRequest {
     pub columns: Vec<ResultColumn>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DatabaseExecutionContext {
-    /// Optional actor identity associated with a mutating database execution.
-    ///
-    /// DatabaseContracts stays deliberately agnostic of cache implementations. Consumers such
-    /// as database plugins may use this context for post-commit side effects owned by the plugin.
-    #[serde(default)]
-    pub actor: Option<String>,
-}
-
-impl DatabaseExecutionContext {
-    #[must_use]
-    pub fn for_actor(actor: impl Into<String>) -> Self {
-        Self { actor: Some(actor.into()) }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExecuteRequest {
     pub statement: String,
     pub parameters: Vec<DatabaseParameter>,
-    #[serde(default)]
-    pub context: DatabaseExecutionContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,22 +192,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn execution_context_can_carry_an_actor_without_database_specific_knowledge() {
-        let context = DatabaseExecutionContext::for_actor("user-1");
-
-        assert_eq!(context.actor.as_deref(), Some("user-1"));
-        assert_eq!(DatabaseExecutionContext::default().actor, None);
-    }
-
-    #[test]
-    fn execute_request_defaults_to_an_empty_execution_context() {
+    fn execute_request_supports_empty_parameters() {
         let request = ExecuteRequest {
             statement: "SELECT 1".to_owned(),
             parameters: Vec::new(),
-            ..Default::default()
         };
 
-        assert_eq!(request.context, DatabaseExecutionContext::default());
+        assert!(request.parameters.is_empty());
     }
 
     #[test]
