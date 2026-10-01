@@ -322,7 +322,7 @@ macro_rules! declare_plugin {
 pub trait IPlugin: Send + Sync + 'static {
     /// Executes a domain-neutral database request when this plugin exposes database capability.
     fn execute_database(
-        &mut self,
+        &self,
         _request: DatabaseRequest
     ) -> Result<DatabaseResponse, DatabaseError> {
         Err(
@@ -341,7 +341,7 @@ pub trait IPlugin: Send + Sync + 'static {
     }
 
     fn handle_endpoint(
-        &mut self,
+        &self,
         request: PluginEndpointRequest
     ) -> Result<PluginEndpointResponse, PluginEndpointError> {
         Err(PluginEndpointError::not_supported(&request.endpoint_id))
@@ -361,7 +361,7 @@ pub trait IPlugin: Send + Sync + 'static {
     fn on_unload(&mut self) -> bool;
 
     fn on_session_closed(
-        &mut self,
+        &self,
         _context: &PluginSessionContext
     ) -> Result<(), PluginLifecycleError> {
         Ok(())
