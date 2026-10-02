@@ -233,14 +233,22 @@ macro_rules! declare_plugin {
                     let Some(instance_ref) = (unsafe { checked_instance(instance) }) else {
                         return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     };
-                    let context = instance_ref.context;
-                    instance_ref.context = ::std::ptr::null_mut();
-                    if !context.is_null() {
-                        unsafe {
-                            drop(::std::boxed::Box::from_raw(context as *mut PluginContext));
-                        }
+
+                    if instance_ref.context.is_null() {
+                        return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     }
+
+                    let context_ptr = instance_ref.context;
+                    let can_destroy = unsafe {
+                        (&mut *(context_ptr as *mut PluginContext)).plugin.on_destroy()
+                    };
+                    if !can_destroy {
+                        return $crate::PluginAbi::PLUGIN_STATUS_PLUGIN_ERROR;
+                    }
+
+                    instance_ref.context = ::std::ptr::null_mut();
                     unsafe {
+                        drop(::std::boxed::Box::from_raw(context_ptr as *mut PluginContext));
                         drop(::std::boxed::Box::from_raw(instance));
                     }
                     $crate::PluginAbi::PLUGIN_STATUS_OK
@@ -359,6 +367,12 @@ pub trait IPlugin: Send + Sync + 'static {
     }
 
     fn on_unload(&mut self) -> bool;
+
+    /// Final plugin-instance destruction hook. Returning `false` aborts destruction so the host
+    /// can keep the runtime and dynamic library loaded and retry safely.
+    fn on_destroy(&mut self) -> bool {
+        true
+    }
 
     fn on_session_closed(
         &self,
