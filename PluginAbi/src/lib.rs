@@ -4,13 +4,13 @@ use std::ffi::c_void;
 
 /// Stable ABI version for dynamically loaded backend plugins.
 ///
-/// This version is intentionally independent from the logical plugin contract version. Changing
-/// the layout or calling convention of the C-compatible types/functions requires a new ABI
-/// version and therefore a new exported constructor symbol.
-pub const PLUGIN_ABI_VERSION_V1: u32 = 1;
+/// ABI V2 introduces an explicit per-call cooperative cancellation signal. Every potentially
+/// cancellable plugin operation receives a [`PluginCancellationV2`] pointer and must observe it at
+/// appropriate safe interruption points. The host never forcefully terminates plugin code.
+pub const PLUGIN_ABI_VERSION_V2: u32 = 2;
 
-/// Exported constructor symbol for ABI v1.
-pub const PLUGIN_CONSTRUCTOR_SYMBOL_V1: &[u8] = b"InstantiateV1\0";
+/// Exported constructor symbol for ABI V2.
+pub const PLUGIN_CONSTRUCTOR_SYMBOL_V2: &[u8] = b"InstantiateV2\0";
 /// Maximum byte payload accepted by any ABI buffer/slice conversion.
 pub const MAX_ABI_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 
@@ -21,6 +21,7 @@ pub const PLUGIN_STATUS_PANIC: i32 = -2;
 pub const PLUGIN_STATUS_NOT_INITIALIZED: i32 = -3;
 pub const PLUGIN_STATUS_SERIALIZATION: i32 = -4;
 pub const PLUGIN_STATUS_PLUGIN_ERROR: i32 = -5;
+pub const PLUGIN_STATUS_CANCELLED: i32 = -6;
 
 /// A borrowed byte slice crossing the ABI boundary.
 ///
@@ -124,40 +125,84 @@ impl AbiBuffer {
     }
 }
 
-pub type PluginLogFnV1 = unsafe extern "C" fn(level: u8, message: AbiSlice);
+/// Called by plugin code to query whether the host has requested cooperative cancellation.
+pub type PluginIsCancelledFnV2 = unsafe extern "C" fn(context: *const c_void) -> bool;
 
-pub type PluginDatabaseExecuteFnV1 = unsafe extern "C" fn(
+/// Per-operation cooperative cancellation state.
+///
+/// The object is borrowed for the duration of exactly one ABI call. Plugins may retain their own
+/// application-level cancellation state, but must not retain this ABI pointer after the callback
+/// returns.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PluginCancellationV2 {
+    pub context: *const c_void,
+    pub is_cancelled: PluginIsCancelledFnV2,
+}
+
+// The cancellation token is an immutable ABI descriptor. Its context pointer is only valid
+// while the associated plugin operation is active; the host keeps that state alive until the
+// worker/lifecycle callback has actually returned.
+unsafe impl Send for PluginCancellationV2 {}
+unsafe impl Sync for PluginCancellationV2 {}
+
+impl PluginCancellationV2 {
+    /// # Safety
+    /// `context` and the callback are supplied by the ABI caller and remain valid for this call.
+    pub unsafe fn is_cancelled(self) -> bool {
+        unsafe { (self.is_cancelled)(self.context) }
+    }
+}
+
+pub type PluginLogFnV2 = unsafe extern "C" fn(level: u8, message: AbiSlice);
+
+pub type PluginDatabaseExecuteFnV2 = unsafe extern "C" fn(
     request: AbiSlice,
+    cancellation: PluginCancellationV2,
     response_out: *mut AbiBuffer
 ) -> i32;
 
-pub type PluginFreeBufferFnV1 = unsafe extern "C" fn(buffer: AbiBuffer);
-pub type PluginNameFnV1 = unsafe extern "C" fn(
+pub type PluginFreeBufferFnV2 = unsafe extern "C" fn(buffer: AbiBuffer);
+pub type PluginNameFnV2 = unsafe extern "C" fn(
     context: *mut c_void,
+    cancellation: PluginCancellationV2,
     response_out: *mut AbiBuffer
 ) -> i32;
-pub type PluginManifestFnV1 = unsafe extern "C" fn(
+pub type PluginManifestFnV2 = unsafe extern "C" fn(
     context: *mut c_void,
+    cancellation: PluginCancellationV2,
     response_out: *mut AbiBuffer
 ) -> i32;
-pub type PluginLoadFnV1 = unsafe extern "C" fn(context: *mut c_void) -> i32;
-pub type PluginLoadedFnV1 = unsafe extern "C" fn(context: *mut c_void) -> i32;
-pub type PluginEndpointFnV1 = unsafe extern "C" fn(
+pub type PluginLoadFnV2 = unsafe extern "C" fn(
     context: *mut c_void,
-    request: AbiSlice,
-    response_out: *mut AbiBuffer
+    cancellation: PluginCancellationV2
 ) -> i32;
-pub type PluginDatabaseFnV1 = unsafe extern "C" fn(
+pub type PluginLoadedFnV2 = unsafe extern "C" fn(
     context: *mut c_void,
-    request: AbiSlice,
-    response_out: *mut AbiBuffer
+    cancellation: PluginCancellationV2
 ) -> i32;
-pub type PluginSessionClosedFnV1 = unsafe extern "C" fn(
+pub type PluginEndpointFnV2 = unsafe extern "C" fn(
     context: *mut c_void,
     request: AbiSlice,
+    cancellation: PluginCancellationV2,
     response_out: *mut AbiBuffer
 ) -> i32;
-pub type PluginDestroyFnV1 = unsafe extern "C" fn(instance: *mut PluginInstanceV1) -> i32;
+pub type PluginDatabaseFnV2 = unsafe extern "C" fn(
+    context: *mut c_void,
+    request: AbiSlice,
+    cancellation: PluginCancellationV2,
+    response_out: *mut AbiBuffer
+) -> i32;
+pub type PluginSessionClosedFnV2 = unsafe extern "C" fn(
+    context: *mut c_void,
+    request: AbiSlice,
+    cancellation: PluginCancellationV2,
+    response_out: *mut AbiBuffer
+) -> i32;
+pub type PluginDestroyFnV2 = unsafe extern "C" fn(
+    instance: *mut PluginInstanceV2,
+    cancellation: PluginCancellationV2
+) -> i32;
 
 /// Host capabilities supplied to a plugin during construction.
 ///
@@ -166,26 +211,26 @@ pub type PluginDestroyFnV1 = unsafe extern "C" fn(instance: *mut PluginInstanceV
 /// truncated payloads and accept compatible newer payloads.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct PluginHostServicesV1 {
+pub struct PluginHostServicesV2 {
     pub abi_version: u32,
     pub struct_size: u32,
-    pub logger: PluginLoggerV1,
-    pub database: Option<PluginDatabaseExecuteFnV1>,
-    pub database_free: Option<PluginFreeBufferFnV1>,
+    pub logger: PluginLoggerV2,
+    pub database: Option<PluginDatabaseExecuteFnV2>,
+    pub database_free: Option<PluginFreeBufferFnV2>,
     pub plugin_directory: AbiSlice,
 }
 
-impl PluginHostServicesV1 {
+impl PluginHostServicesV2 {
     pub const fn new(
-        logger: PluginLogFnV1,
-        database: Option<PluginDatabaseExecuteFnV1>,
-        database_free: Option<PluginFreeBufferFnV1>,
+        logger: PluginLogFnV2,
+        database: Option<PluginDatabaseExecuteFnV2>,
+        database_free: Option<PluginFreeBufferFnV2>,
         plugin_directory: AbiSlice
     ) -> Self {
         Self {
-            abi_version: PLUGIN_ABI_VERSION_V1,
+            abi_version: PLUGIN_ABI_VERSION_V2,
             struct_size: std::mem::size_of::<Self>() as u32,
-            logger: PluginLoggerV1 { emit: logger },
+            logger: PluginLoggerV2 { emit: logger },
             database,
             database_free,
             plugin_directory,
@@ -193,15 +238,15 @@ impl PluginHostServicesV1 {
     }
 
     pub const fn is_compatible(&self) -> bool {
-        self.abi_version == PLUGIN_ABI_VERSION_V1 &&
+        self.abi_version == PLUGIN_ABI_VERSION_V2 &&
             self.struct_size >= (std::mem::size_of::<Self>() as u32)
     }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct PluginLoggerV1 {
-    pub emit: PluginLogFnV1,
+pub struct PluginLoggerV2 {
+    pub emit: PluginLogFnV2,
 }
 
 /// Function table implemented by a plugin library.
@@ -209,50 +254,47 @@ pub struct PluginLoggerV1 {
 /// No Rust references, `Box`, `Vec`, `String`, trait objects, or Rust enums cross this boundary.
 /// All payloads use primitive C-compatible fields or explicitly borrowed/owned byte buffers.
 #[repr(C)]
-pub struct PluginVTableV1 {
+pub struct PluginVTableV2 {
     pub abi_version: u32,
     pub struct_size: u32,
-    pub name: PluginNameFnV1,
-    pub manifest: PluginManifestFnV1,
-    pub on_load: PluginLoadFnV1,
-    pub is_loaded: PluginLoadedFnV1,
-    pub handle_endpoint: PluginEndpointFnV1,
-    pub execute_database: PluginDatabaseFnV1,
-    pub on_session_closed: PluginSessionClosedFnV1,
-    pub on_unload: PluginLoadFnV1,
-    pub free_buffer: PluginFreeBufferFnV1,
-    pub destroy: PluginDestroyFnV1,
+    pub name: PluginNameFnV2,
+    pub manifest: PluginManifestFnV2,
+    pub on_load: PluginLoadFnV2,
+    pub is_loaded: PluginLoadedFnV2,
+    pub handle_endpoint: PluginEndpointFnV2,
+    pub execute_database: PluginDatabaseFnV2,
+    pub on_session_closed: PluginSessionClosedFnV2,
+    pub on_unload: PluginLoadFnV2,
+    pub free_buffer: PluginFreeBufferFnV2,
+    pub destroy: PluginDestroyFnV2,
 }
 
-impl PluginVTableV1 {
+impl PluginVTableV2 {
     pub const fn is_compatible(&self) -> bool {
-        self.abi_version == PLUGIN_ABI_VERSION_V1 &&
+        self.abi_version == PLUGIN_ABI_VERSION_V2 &&
             self.struct_size >= (std::mem::size_of::<Self>() as u32)
     }
 }
 
 /// Opaque plugin instance returned from the dynamic library.
-///
-/// The host treats `context` as opaque and only invokes operations from the versioned function
-/// table. The instance is destroyed by the plugin itself through [`PluginDestroyFnV1`].
 #[repr(C)]
-pub struct PluginInstanceV1 {
+pub struct PluginInstanceV2 {
     pub abi_version: u32,
     pub struct_size: u32,
     pub context: *mut c_void,
-    pub vtable: *const PluginVTableV1,
+    pub vtable: *const PluginVTableV2,
 }
 
-impl PluginInstanceV1 {
+impl PluginInstanceV2 {
     pub const fn abi_version() -> u32 {
-        PLUGIN_ABI_VERSION_V1
+        PLUGIN_ABI_VERSION_V2
     }
 }
 
-/// Constructor function exported by a plugin library for ABI v1.
-pub type PluginCreateFnV1 = unsafe extern "C" fn(
-    host_services: *const PluginHostServicesV1
-) -> *mut PluginInstanceV1;
+/// Constructor function exported by a plugin library for ABI V2.
+pub type PluginCreateFnV2 = unsafe extern "C" fn(
+    host_services: *const PluginHostServicesV2
+) -> *mut PluginInstanceV2;
 
 #[cfg(test)]
 mod tests {
@@ -268,12 +310,26 @@ mod tests {
 
     #[test]
     fn host_services_are_pointer_sized_and_versioned() {
-        let size = std::mem::size_of::<PluginHostServicesV1>();
-        let host = PluginHostServicesV1::new(dummy_log, None, None, AbiSlice::EMPTY);
-        assert_eq!(host.abi_version, PLUGIN_ABI_VERSION_V1);
+        let size = std::mem::size_of::<PluginHostServicesV2>();
+        let host = PluginHostServicesV2::new(dummy_log, None, None, AbiSlice::EMPTY);
+        assert_eq!(host.abi_version, PLUGIN_ABI_VERSION_V2);
         assert_eq!(host.struct_size as usize, size);
         assert!(host.is_compatible());
     }
 
+    #[test]
+    fn cancellation_callback_is_cooperative() {
+        let value = true;
+        let cancellation = PluginCancellationV2 {
+            context: &value as *const bool as *const c_void,
+            is_cancelled: test_is_cancelled,
+        };
+        assert!(unsafe { cancellation.is_cancelled() });
+    }
+
     unsafe extern "C" fn dummy_log(_level: u8, _message: AbiSlice) {}
+
+    unsafe extern "C" fn test_is_cancelled(context: *const c_void) -> bool {
+        unsafe { *(context as *const bool) }
+    }
 }

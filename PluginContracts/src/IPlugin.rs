@@ -1,5 +1,6 @@
 use DatabaseContracts::{ DatabaseError, DatabaseRequest, DatabaseResponse };
 use crate::ApiContract::{
+    PluginCancellation,
     PluginEndpointError,
     PluginEndpointRequest,
     PluginEndpointResponse,
@@ -9,16 +10,16 @@ use crate::ApiContract::{
     PluginHostServices,
 };
 
-/// Declares the in-process plugin implementation and exports the stable ABI v1 constructor.
+/// Declares the in-process plugin implementation and exports the stable ABI V2 constructor.
 ///
-/// The exported ABI does not expose `Box<dyn IPlugin>` or any other Rust ABI type. The plugin
-/// implementation remains a normal Rust trait internally and is wrapped behind an opaque handle
-/// and versioned C-compatible function table.
+/// ABI V2 passes an explicit cooperative cancellation signal to every potentially long-running
+/// plugin operation. The dynamic-library boundary still exposes only opaque handles, a versioned
+/// C-compatible function table and serialized byte buffers.
 #[macro_export]
 macro_rules! declare_plugin {
     ($constructor:path) => {
         #[doc(hidden)]
-        mod __ezf_plugin_abi_v1 {
+        mod __ezf_plugin_abi_v2 {
             use super::*;
             struct PluginContext {
                 plugin: ::std::boxed::Box<dyn $crate::IPlugin::IPlugin>,
@@ -34,12 +35,18 @@ macro_rules! declare_plugin {
             }
 
             unsafe fn checked_instance(
-                instance: *mut $crate::PluginAbi::PluginInstanceV1,
-            ) -> Option<&'static mut $crate::PluginAbi::PluginInstanceV1> {
+                instance: *mut $crate::PluginAbi::PluginInstanceV2,
+            ) -> Option<&'static mut $crate::PluginAbi::PluginInstanceV2> {
                 if instance.is_null() {
                     return None;
                 }
                 Some(unsafe { &mut *instance })
+            }
+
+            fn convert_cancellation(
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
+            ) -> $crate::ApiContract::PluginCancellation {
+                $crate::ApiContract::PluginCancellation::from_abi(cancellation)
             }
 
             fn write_json<T: ::serde::Serialize>(
@@ -72,13 +79,17 @@ macro_rules! declare_plugin {
 
             unsafe extern "C" fn plugin_name(
                 context: *mut ::std::ffi::c_void,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
                 response_out: *mut $crate::PluginAbi::AbiBuffer,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     let Some(context) = (unsafe { context_mut(context) }) else {
                         return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     };
-                    write_json(&context.plugin.name(), response_out)
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, ||
+                        write_json(&context.plugin.name(), response_out)
+                    )
                 })) {
                     Ok(status) => status,
                     Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
@@ -87,13 +98,17 @@ macro_rules! declare_plugin {
 
             unsafe extern "C" fn plugin_manifest(
                 context: *mut ::std::ffi::c_void,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
                 response_out: *mut $crate::PluginAbi::AbiBuffer,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     let Some(context) = (unsafe { context_mut(context) }) else {
                         return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     };
-                    write_json(&context.plugin.manifest(), response_out)
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, ||
+                        write_json(&context.plugin.manifest(), response_out)
+                    )
                 })) {
                     Ok(status) => status,
                     Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
@@ -102,16 +117,20 @@ macro_rules! declare_plugin {
 
             unsafe extern "C" fn plugin_on_load(
                 context: *mut ::std::ffi::c_void,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     let Some(context) = (unsafe { context_mut(context) }) else {
                         return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     };
-                    if context.plugin.on_load() {
-                        $crate::PluginAbi::PLUGIN_STATUS_OK
-                    } else {
-                        $crate::PluginAbi::PLUGIN_STATUS_PLUGIN_ERROR
-                    }
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                        if context.plugin.on_load() {
+                            $crate::PluginAbi::PLUGIN_STATUS_OK
+                        } else {
+                            $crate::PluginAbi::PLUGIN_STATUS_PLUGIN_ERROR
+                        }
+                    })
                 })) {
                     Ok(status) => status,
                     Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
@@ -120,16 +139,20 @@ macro_rules! declare_plugin {
 
             unsafe extern "C" fn plugin_is_loaded(
                 context: *mut ::std::ffi::c_void,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     let Some(context) = (unsafe { context_mut(context) }) else {
                         return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     };
-                    if context.plugin.isLoaded() {
-                        $crate::PluginAbi::PLUGIN_STATUS_OK
-                    } else {
-                        $crate::PluginAbi::PLUGIN_STATUS_NOT_INITIALIZED
-                    }
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                        if context.plugin.isLoaded() {
+                            $crate::PluginAbi::PLUGIN_STATUS_OK
+                        } else {
+                            $crate::PluginAbi::PLUGIN_STATUS_NOT_INITIALIZED
+                        }
+                    })
                 })) {
                     Ok(status) => status,
                     Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
@@ -139,6 +162,7 @@ macro_rules! declare_plugin {
             unsafe extern "C" fn plugin_handle_endpoint(
                 context: *mut ::std::ffi::c_void,
                 request: $crate::PluginAbi::AbiSlice,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
                 response_out: *mut $crate::PluginAbi::AbiBuffer,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
@@ -150,8 +174,11 @@ macro_rules! declare_plugin {
                             Ok(request) => request,
                             Err(status) => return status,
                         };
-                    let response = context.plugin.handle_endpoint(request);
-                    write_json(&response, response_out)
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                        let response = context.plugin.handle_endpoint(request, &cancellation);
+                        write_json(&response, response_out)
+                    })
                 })) {
                     Ok(status) => status,
                     Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
@@ -161,6 +188,7 @@ macro_rules! declare_plugin {
             unsafe extern "C" fn plugin_execute_database(
                 context: *mut ::std::ffi::c_void,
                 request: $crate::PluginAbi::AbiSlice,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
                 response_out: *mut $crate::PluginAbi::AbiBuffer,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
@@ -172,8 +200,11 @@ macro_rules! declare_plugin {
                             Ok(request) => request,
                             Err(status) => return status,
                         };
-                    let response = context.plugin.execute_database(request);
-                    write_json(&response, response_out)
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                        let response = context.plugin.execute_database(request, &cancellation);
+                        write_json(&response, response_out)
+                    })
                 })) {
                     Ok(status) => status,
                     Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
@@ -183,6 +214,7 @@ macro_rules! declare_plugin {
             unsafe extern "C" fn plugin_on_session_closed(
                 context: *mut ::std::ffi::c_void,
                 request: $crate::PluginAbi::AbiSlice,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
                 response_out: *mut $crate::PluginAbi::AbiBuffer,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
@@ -194,8 +226,11 @@ macro_rules! declare_plugin {
                             Ok(request) => request,
                             Err(status) => return status,
                         };
-                    let response = context.plugin.on_session_closed(&request);
-                    write_json(&response, response_out)
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                        let response = context.plugin.on_session_closed(&request, &cancellation);
+                        write_json(&response, response_out)
+                    })
                 })) {
                     Ok(status) => status,
                     Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
@@ -204,16 +239,20 @@ macro_rules! declare_plugin {
 
             unsafe extern "C" fn plugin_on_unload(
                 context: *mut ::std::ffi::c_void,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     let Some(context) = (unsafe { context_mut(context) }) else {
                         return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     };
-                    if context.plugin.on_unload() {
-                        $crate::PluginAbi::PLUGIN_STATUS_OK
-                    } else {
-                        $crate::PluginAbi::PLUGIN_STATUS_PLUGIN_ERROR
-                    }
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                        if context.plugin.on_unload(&cancellation) {
+                            $crate::PluginAbi::PLUGIN_STATUS_OK
+                        } else {
+                            $crate::PluginAbi::PLUGIN_STATUS_PLUGIN_ERROR
+                        }
+                    })
                 })) {
                     Ok(status) => status,
                     Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
@@ -227,7 +266,8 @@ macro_rules! declare_plugin {
             }
 
             unsafe extern "C" fn plugin_destroy(
-                instance: *mut $crate::PluginAbi::PluginInstanceV1,
+                instance: *mut $crate::PluginAbi::PluginInstanceV2,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
             ) -> i32 {
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     let Some(instance_ref) = (unsafe { checked_instance(instance) }) else {
@@ -239,9 +279,10 @@ macro_rules! declare_plugin {
                     }
 
                     let context_ptr = instance_ref.context;
-                    let can_destroy = unsafe {
-                        (&mut *(context_ptr as *mut PluginContext)).plugin.on_destroy()
-                    };
+                    let cancellation = convert_cancellation(cancellation);
+                    let can_destroy = $crate::ApiContract::with_plugin_cancellation(cancellation, ||
+                        unsafe { (&mut *(context_ptr as *mut PluginContext)).plugin.on_destroy(&cancellation) }
+                    );
                     if !can_destroy {
                         return $crate::PluginAbi::PLUGIN_STATUS_PLUGIN_ERROR;
                     }
@@ -258,10 +299,10 @@ macro_rules! declare_plugin {
                 }
             }
 
-            static PLUGIN_VTABLE: $crate::PluginAbi::PluginVTableV1 =
-                $crate::PluginAbi::PluginVTableV1 {
-                    abi_version: $crate::PluginAbi::PLUGIN_ABI_VERSION_V1,
-                    struct_size: ::std::mem::size_of::<$crate::PluginAbi::PluginVTableV1>() as u32,
+            static PLUGIN_VTABLE: $crate::PluginAbi::PluginVTableV2 =
+                $crate::PluginAbi::PluginVTableV2 {
+                    abi_version: $crate::PluginAbi::PLUGIN_ABI_VERSION_V2,
+                    struct_size: ::std::mem::size_of::<$crate::PluginAbi::PluginVTableV2>() as u32,
                     name: plugin_name,
                     manifest: plugin_manifest,
                     on_load: plugin_on_load,
@@ -275,18 +316,18 @@ macro_rules! declare_plugin {
                 };
 
             #[unsafe(no_mangle)]
-            pub unsafe extern "C" fn InstantiateV1(
-                host_services: *const $crate::PluginAbi::PluginHostServicesV1,
-            ) -> *mut $crate::PluginAbi::PluginInstanceV1 {
+            pub unsafe extern "C" fn InstantiateV2(
+                host_services: *const $crate::PluginAbi::PluginHostServicesV2,
+            ) -> *mut $crate::PluginAbi::PluginInstanceV2 {
                 let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     if host_services.is_null() {
                         return ::std::ptr::null_mut();
                     }
 
                     let host_services = unsafe { *host_services };
-                    if host_services.abi_version != $crate::PluginAbi::PLUGIN_ABI_VERSION_V1
+                    if host_services.abi_version != $crate::PluginAbi::PLUGIN_ABI_VERSION_V2
                         || host_services.struct_size
-                            < ::std::mem::size_of::<$crate::PluginAbi::PluginHostServicesV1>() as u32
+                            < ::std::mem::size_of::<$crate::PluginAbi::PluginHostServicesV2>() as u32
                     {
                         return ::std::ptr::null_mut();
                     }
@@ -303,15 +344,21 @@ macro_rules! declare_plugin {
 
                     let mut plugin = $constructor();
                     if !plugin.on_load_with_host(&host_services) {
-                        let _ = plugin.on_unload();
+                        let cancellation = $crate::ApiContract::PluginCancellation::from_abi(
+                            $crate::PluginAbi::PluginCancellationV2 {
+                                context: ::std::ptr::null(),
+                                is_cancelled: never_cancelled,
+                            }
+                        );
+                        let _ = plugin.on_unload(&cancellation);
                         return ::std::ptr::null_mut();
                     }
 
                     let context = ::std::boxed::Box::new(PluginContext { plugin });
                     let context_ptr = ::std::boxed::Box::into_raw(context) as *mut ::std::ffi::c_void;
-                    let instance = ::std::boxed::Box::new($crate::PluginAbi::PluginInstanceV1 {
-                        abi_version: $crate::PluginAbi::PLUGIN_ABI_VERSION_V1,
-                        struct_size: ::std::mem::size_of::<$crate::PluginAbi::PluginInstanceV1>() as u32,
+                    let instance = ::std::boxed::Box::new($crate::PluginAbi::PluginInstanceV2 {
+                        abi_version: $crate::PluginAbi::PLUGIN_ABI_VERSION_V2,
+                        struct_size: ::std::mem::size_of::<$crate::PluginAbi::PluginInstanceV2>() as u32,
                         context: context_ptr,
                         vtable: &PLUGIN_VTABLE,
                     });
@@ -323,6 +370,10 @@ macro_rules! declare_plugin {
                     Err(_) => ::std::ptr::null_mut(),
                 }
             }
+
+            unsafe extern "C" fn never_cancelled(_context: *const ::std::ffi::c_void) -> bool {
+                false
+            }
         }
     };
 }
@@ -331,7 +382,8 @@ pub trait IPlugin: Send + Sync + 'static {
     /// Executes a domain-neutral database request when this plugin exposes database capability.
     fn execute_database(
         &self,
-        _request: DatabaseRequest
+        _request: DatabaseRequest,
+        _cancellation: &PluginCancellation
     ) -> Result<DatabaseResponse, DatabaseError> {
         Err(
             DatabaseError::unsupported(
@@ -350,7 +402,8 @@ pub trait IPlugin: Send + Sync + 'static {
 
     fn handle_endpoint(
         &self,
-        request: PluginEndpointRequest
+        request: PluginEndpointRequest,
+        _cancellation: &PluginCancellation
     ) -> Result<PluginEndpointResponse, PluginEndpointError> {
         Err(PluginEndpointError::not_supported(&request.endpoint_id))
     }
@@ -366,17 +419,19 @@ pub trait IPlugin: Send + Sync + 'static {
         self.on_load()
     }
 
-    fn on_unload(&mut self) -> bool;
+    /// Cooperative unload callback. The host has already quiesced normal calls before entering it.
+    fn on_unload(&mut self, _cancellation: &PluginCancellation) -> bool;
 
     /// Final plugin-instance destruction hook. Returning `false` aborts destruction so the host
     /// can keep the runtime and dynamic library loaded and retry safely.
-    fn on_destroy(&mut self) -> bool {
+    fn on_destroy(&mut self, _cancellation: &PluginCancellation) -> bool {
         true
     }
 
     fn on_session_closed(
         &self,
-        _context: &PluginSessionContext
+        _context: &PluginSessionContext,
+        _cancellation: &PluginCancellation
     ) -> Result<(), PluginLifecycleError> {
         Ok(())
     }

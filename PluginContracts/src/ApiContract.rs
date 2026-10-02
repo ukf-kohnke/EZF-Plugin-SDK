@@ -36,10 +36,11 @@ use DatabaseContracts::{ DatabaseError, DatabaseRequest, DatabaseResponse };
 use PluginAbi::{
     AbiBuffer,
     AbiSlice,
-    PluginDatabaseExecuteFnV1,
-    PluginFreeBufferFnV1,
-    PluginHostServicesV1,
-    PLUGIN_ABI_VERSION_V1,
+    PluginCancellationV2,
+    PluginDatabaseExecuteFnV2,
+    PluginFreeBufferFnV2,
+    PluginHostServicesV2,
+    PLUGIN_ABI_VERSION_V2,
 };
 use serde::{ Deserialize, Serialize };
 use serde_json::Value;
@@ -58,8 +59,38 @@ pub const MAX_PLUGIN_OPENAPI_EXAMPLE_BYTES: usize = 128 * 1024;
 
 /// Internal alias for the stable ABI callback types. These are no longer used to expose Rust
 /// contract objects across the dynamic-library boundary; payloads are serialized bytes.
-pub type PluginDatabaseExecuteFn = PluginDatabaseExecuteFnV1;
-pub type PluginFreeBufferFn = PluginFreeBufferFnV1;
+pub type PluginDatabaseExecuteFn = PluginDatabaseExecuteFnV2;
+pub type PluginFreeBufferFn = PluginFreeBufferFnV2;
+
+/// Cooperative cancellation state exposed to Rust plugin implementations.
+///
+/// The value is a lightweight view over the ABI-owned cancellation callback and is only valid
+/// during the plugin operation that received it.
+#[derive(Clone, Copy)]
+pub struct PluginCancellation {
+    abi: PluginCancellationV2,
+}
+
+impl PluginCancellation {
+    pub fn from_abi(abi: PluginCancellationV2) -> Self {
+        Self { abi }
+    }
+
+    pub fn uncancelled() -> Self {
+        Self::from_abi(PluginCancellationV2 {
+            context: std::ptr::null(),
+            is_cancelled: never_cancelled,
+        })
+    }
+
+    pub fn as_abi(&self) -> PluginCancellationV2 {
+        self.abi
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        unsafe { (self.abi.is_cancelled)(self.abi.context) }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginLogLevel {
@@ -70,7 +101,7 @@ pub enum PluginLogLevel {
     Trace = 5,
 }
 
-pub type PluginLogFn = PluginAbi::PluginLogFnV1;
+pub type PluginLogFn = PluginAbi::PluginLogFnV2;
 
 #[derive(Clone, Copy)]
 pub struct PluginLogger {
@@ -92,7 +123,7 @@ pub struct PluginDatabaseCapability {
 }
 
 /// Host services used internally by the Rust `IPlugin` implementation. The dynamic-library ABI
-/// uses `PluginAbi::PluginHostServicesV1` instead; this type is reconstructed inside the plugin
+/// uses `PluginAbi::PluginHostServicesV2` instead; this type is reconstructed inside the plugin
 /// and therefore never crosses the ABI boundary.
 #[derive(Clone)]
 pub struct PluginHostServices {
@@ -103,8 +134,8 @@ pub struct PluginHostServices {
 }
 
 impl PluginHostServices {
-    pub fn from_abi(host: PluginHostServicesV1) -> Option<Self> {
-        if host.abi_version != PLUGIN_ABI_VERSION_V1 || !host.is_compatible() {
+    pub fn from_abi(host: PluginHostServicesV2) -> Option<Self> {
+        if host.abi_version != PLUGIN_ABI_VERSION_V2 || !host.is_compatible() {
             return None;
         }
 
@@ -170,7 +201,7 @@ static HOST_FORWARDING_LOGGER: OnceLock<HostForwardingLogger> = OnceLock::new();
 static HOST_FORWARDING_LOGGER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 pub fn initialize_plugin_logging(host: PluginHostServices) -> bool {
-    if host.version != PLUGIN_ABI_VERSION_V1 {
+    if host.version != PLUGIN_ABI_VERSION_V2 {
         return false;
     }
 
@@ -195,6 +226,35 @@ thread_local! {
     static ACTIVE_DATABASE_EXECUTOR: RefCell<Option<PluginDatabaseCapability>> = const {
         RefCell::new(None)
     };
+
+    static ACTIVE_PLUGIN_CANCELLATION: RefCell<Option<PluginCancellation>> = const {
+        RefCell::new(None)
+    };
+}
+
+struct PluginCancellationScope {
+    previous: Option<PluginCancellation>,
+}
+
+impl Drop for PluginCancellationScope {
+    fn drop(&mut self) {
+        ACTIVE_PLUGIN_CANCELLATION.with(|slot| {
+            let _ = slot.replace(self.previous.take());
+        });
+    }
+}
+
+pub fn with_plugin_cancellation<T>(
+    cancellation: PluginCancellation,
+    operation: impl FnOnce() -> T
+) -> T {
+    let previous = ACTIVE_PLUGIN_CANCELLATION.with(|slot| slot.replace(Some(cancellation)));
+    let _scope = PluginCancellationScope { previous };
+    operation()
+}
+
+pub fn current_plugin_cancellation() -> Option<PluginCancellation> {
+    ACTIVE_PLUGIN_CANCELLATION.with(|slot| slot.borrow().as_ref().copied())
 }
 
 struct DatabaseExecutorScope {
@@ -222,6 +282,10 @@ pub fn database_executor() -> Option<PluginDatabaseCapability> {
     ACTIVE_DATABASE_EXECUTOR.with(|slot| slot.borrow().as_ref().copied())
 }
 
+unsafe extern "C" fn never_cancelled(_context: *const std::ffi::c_void) -> bool {
+    false
+}
+
 pub fn execute_database(request: DatabaseRequest) -> Result<DatabaseResponse, DatabaseError> {
     let Some(capability) = database_executor() else {
         return Err(DatabaseError::unsupported("plugin host does not expose database execution"));
@@ -236,8 +300,24 @@ pub fn execute_database(request: DatabaseRequest) -> Result<DatabaseResponse, Da
             )
         )?;
     let mut response = AbiBuffer::EMPTY;
+    let cancellation = current_plugin_cancellation().unwrap_or_else(
+        PluginCancellation::uncancelled
+    );
+    if cancellation.is_cancelled() {
+        return Err(
+            DatabaseError::new(
+                DatabaseContracts::DatabaseErrorKind::Query,
+                "database request cancelled"
+            )
+        );
+    }
+
     let status = unsafe {
-        (capability.execute)(AbiSlice::from_bytes(&request_bytes), &mut response)
+        (capability.execute)(
+            AbiSlice::from_bytes(&request_bytes),
+            cancellation.as_abi(),
+            &mut response
+        )
     };
 
     if status != PluginAbi::PLUGIN_STATUS_OK {
@@ -247,10 +327,13 @@ pub fn execute_database(request: DatabaseRequest) -> Result<DatabaseResponse, Da
             }
         }
         return Err(
-            DatabaseError::new(
-                DatabaseContracts::DatabaseErrorKind::Query,
+            DatabaseError::new(DatabaseContracts::DatabaseErrorKind::Query, if
+                status == PluginAbi::PLUGIN_STATUS_CANCELLED
+            {
+                "host database capability cancelled".to_owned()
+            } else {
                 format!("host database capability failed with ABI status {status}")
-            )
+            })
         );
     }
 
@@ -1463,7 +1546,7 @@ mod plugin_host_abi_tests {
     #[test]
     fn abi_host_services_are_reconstructed_without_rust_owned_ffi_types() {
         let directory = b"/plugins/MolgenDB".to_vec();
-        let host = PluginHostServicesV1::new(
+        let host = PluginHostServicesV2::new(
             dummy_log,
             None,
             None,
@@ -1471,7 +1554,7 @@ mod plugin_host_abi_tests {
         );
 
         let services = PluginHostServices::from_abi(host).expect("host services must decode");
-        assert_eq!(services.version, PLUGIN_ABI_VERSION_V1);
+        assert_eq!(services.version, PLUGIN_ABI_VERSION_V2);
         assert_eq!(services.plugin_directory(), Some(PathBuf::from("/plugins/MolgenDB")));
         assert!(services.database.is_none());
     }
