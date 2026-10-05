@@ -927,6 +927,33 @@ impl PluginCatalog {
         self.function_owners.get(&normalize_identifier(function)).map(String::as_str)
     }
 
+    /// Resolves the plugin owning a REST endpoint by its externally visible HTTP contract.
+    ///
+    /// The plugin name is deliberately not part of the lookup key. This is the important
+    /// boundary that keeps callers independent from concrete plugin names: the catalog owns
+    /// the mapping from `(method, path)` to the plugin that implements it.
+    pub fn plugin_for_endpoint(&self, method: PluginHttpMethod, path: &str) -> Option<&str> {
+        let normalized_path = normalize_plugin_path(path).ok()?;
+        self.endpoints.iter().find_map(|binding| {
+            (binding.endpoint.method == method &&
+                normalize_plugin_path(&binding.endpoint.path).ok().as_deref() == Some(normalized_path.as_str()))
+                .then_some(binding.plugin_name.as_str())
+        })
+    }
+
+    /// Returns the catalog binding for an HTTP endpoint.
+    pub fn endpoint_binding(
+        &self,
+        method: PluginHttpMethod,
+        path: &str
+    ) -> Option<&PluginEndpointBinding> {
+        let normalized_path = normalize_plugin_path(path).ok()?;
+        self.endpoints.iter().find(|binding| {
+            binding.endpoint.method == method &&
+                normalize_plugin_path(&binding.endpoint.path).ok().as_deref() == Some(normalized_path.as_str())
+        })
+    }
+
     pub fn endpoint_count(&self) -> usize {
         self.endpoints.len()
     }
@@ -1520,6 +1547,34 @@ mod tests {
 
         let error = PluginCatalog::from_manifests([plugin]).unwrap_err();
         assert!(matches!(error, PluginCatalogError::InvalidEndpointBodyContract { .. }));
+    }
+
+    #[test]
+    fn resolves_endpoint_owner_from_http_contract_without_name_derivation() {
+        let mut first = manifest("BusinessAlpha");
+        first.endpoints.push(
+            PluginEndpointDescriptor::get("alpha-operation", "/getBusinessRecord")
+        );
+
+        let mut second = manifest("CompletelyDifferentName");
+        second.endpoints.push(
+            PluginEndpointDescriptor::get("beta-operation", "/getOtherRecord")
+        );
+
+        let catalog = PluginCatalog::from_manifests([first, second]).unwrap();
+
+        assert_eq!(
+            catalog.plugin_for_endpoint(PluginHttpMethod::Get, "/getBusinessRecord"),
+            Some("BusinessAlpha")
+        );
+        assert_eq!(
+            catalog.plugin_for_endpoint(PluginHttpMethod::Get, "/getOtherRecord"),
+            Some("CompletelyDifferentName")
+        );
+        assert_eq!(
+            catalog.plugin_for_endpoint(PluginHttpMethod::Post, "/getBusinessRecord"),
+            None
+        );
     }
 
     #[test]
