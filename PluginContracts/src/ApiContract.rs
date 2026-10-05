@@ -4,11 +4,11 @@
 /// It enforces versioning, naming conventions, and security constraints for plugin endpoints.
 ///
 /// # Plugin Contract Version
-/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (6)
+/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (7)
 /// - Maximum request body size: [`MAX_PLUGIN_REQUEST_BODY_BYTES`] (64 MiB)
 ///
 /// # Key Types
-/// - [`PluginManifest`]: Describes a plugin's metadata, functions, and endpoints
+/// - [`PluginManifest`]: Describes a plugin's metadata and endpoints
 /// - [`PluginEndpointDescriptor`]: Defines an individual API endpoint
 /// - [`PluginEndpointRequest`]/[`PluginEndpointResponse`]: Request/response structures
 /// - [`PluginSessionContext`]: Sanitized lifecycle context for discarded sessions
@@ -18,8 +18,7 @@
 /// The catalog validates:
 /// - No duplicate plugin names (case-insensitive)
 /// - No conflicting routes across plugins
-/// - No duplicate function exports
-/// - Valid identifiers, paths, and media types
+/// /// - Valid identifiers, paths, and media types
 /// - No reserved route collisions
 /// - Proper request body configuration
 ///
@@ -52,7 +51,7 @@ use std::{
     sync::{ atomic::{ AtomicBool, Ordering }, OnceLock },
 };
 
-pub const PLUGIN_CONTRACT_VERSION: u32 = 6;
+pub const PLUGIN_CONTRACT_VERSION: u32 = 7;
 pub const JSON_BODY_LIMIT: u64 = 2 * 1024 * 1024;
 pub const MAX_PLUGIN_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PLUGIN_OPENAPI_EXAMPLE_BYTES: usize = 128 * 1024;
@@ -611,12 +610,12 @@ impl PluginEndpointDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginManifest {
     pub contract_version: u32,
     pub name: String,
     pub version: String,
     pub kind: PluginKind,
-    pub functions: Vec<String>,
     pub endpoints: Vec<PluginEndpointDescriptor>,
 }
 
@@ -627,7 +626,6 @@ impl PluginManifest {
             name: name.into(),
             version: version.into(),
             kind,
-            functions: Vec::new(),
             endpoints: Vec::new(),
         }
     }
@@ -827,7 +825,6 @@ pub struct PluginEndpointBinding {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginCatalog {
     pub plugins: BTreeMap<String, PluginManifest>,
-    pub function_owners: BTreeMap<String, String>,
     pub endpoints: Vec<PluginEndpointBinding>,
 }
 
@@ -854,26 +851,6 @@ impl PluginCatalog {
             }
 
             let mut endpoint_ids = BTreeSet::new();
-            for function in &manifest.functions {
-                let normalized_function = normalize_identifier(function);
-                if !is_valid_identifier(function) {
-                    return Err(PluginCatalogError::InvalidFunction {
-                        plugin: manifest.name.clone(),
-                        function: function.clone(),
-                    });
-                }
-
-                if let Some(existing_owner) = catalog.function_owners.get(&normalized_function) {
-                    return Err(PluginCatalogError::DuplicateFunction {
-                        function: function.clone(),
-                        existing_plugin: existing_owner.clone(),
-                        plugin: manifest.name.clone(),
-                    });
-                }
-
-                catalog.function_owners.insert(normalized_function, manifest.name.clone());
-            }
-
             for endpoint in &manifest.endpoints {
                 validate_endpoint(&manifest.name, endpoint)?;
                 let endpoint_id = normalize_identifier(&endpoint.id);
@@ -923,10 +900,6 @@ impl PluginCatalog {
         Ok(catalog)
     }
 
-    pub fn plugin_for_function(&self, function: &str) -> Option<&str> {
-        self.function_owners.get(&normalize_identifier(function)).map(String::as_str)
-    }
-
     /// Resolves the plugin owning a REST endpoint by its externally visible HTTP contract.
     ///
     /// The plugin name is deliberately not part of the lookup key. This is the important
@@ -973,15 +946,6 @@ pub enum PluginCatalogError {
     DuplicatePlugin {
         plugin: String,
         existing: String,
-    },
-    InvalidFunction {
-        plugin: String,
-        function: String,
-    },
-    DuplicateFunction {
-        function: String,
-        existing_plugin: String,
-        plugin: String,
     },
     InvalidEndpointPath {
         path: String,
@@ -1046,13 +1010,6 @@ impl fmt::Display for PluginCatalogError {
                 write!(
                     formatter,
                     "plugin name '{plugin}' conflicts with already loaded plugin '{existing}'"
-                ),
-            Self::InvalidFunction { plugin, function } =>
-                write!(formatter, "plugin '{plugin}' exports invalid function name '{function}'"),
-            Self::DuplicateFunction { function, existing_plugin, plugin } =>
-                write!(
-                    formatter,
-                    "function '{function}' is exported by both '{existing_plugin}' and '{plugin}'"
                 ),
             Self::InvalidEndpointPath { path, reason } => {
                 write!(formatter, "invalid plugin endpoint path '{path}': {reason}")
@@ -1425,14 +1382,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_function_owners_case_insensitively() {
-        let mut first = manifest("First");
-        first.functions.push("LoadData".to_owned());
-        let mut second = manifest("Second");
-        second.functions.push("loaddata".to_owned());
+    fn rejects_removed_function_manifest_field() {
+        let json = r#"{
+            "contract_version": 7,
+            "name": "LegacyPlugin",
+            "version": "1.0.0",
+            "kind": "Domain",
+            "functions": [],
+            "endpoints": []
+        }"#;
 
-        let error = PluginCatalog::from_manifests([first, second]).unwrap_err();
-        assert!(matches!(error, PluginCatalogError::DuplicateFunction { .. }));
+        assert!(serde_json::from_str::<PluginManifest>(json).is_err());
     }
 
     #[test]
@@ -1577,19 +1537,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolves_function_owner_from_valid_catalog() {
-        let mut plugin = manifest("ProcessTracker");
-        plugin.functions.push("GetProcessListByPatientId".to_owned());
-        plugin.endpoints.push(PluginEndpointDescriptor::get("processes", "/getProcessListById"));
-
-        let catalog = PluginCatalog::from_manifests([plugin]).unwrap();
-        assert_eq!(
-            catalog.plugin_for_function("getprocesslistbypatientid"),
-            Some("ProcessTracker")
-        );
-        assert_eq!(catalog.endpoint_count(), 1);
-    }
 }
 
 #[cfg(test)]
