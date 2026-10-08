@@ -907,11 +907,15 @@ impl PluginCatalog {
     /// the mapping from `(method, path)` to the plugin that implements it.
     pub fn plugin_for_endpoint(&self, method: PluginHttpMethod, path: &str) -> Option<&str> {
         let normalized_path = normalize_plugin_path(path).ok()?;
-        self.endpoints.iter().find_map(|binding| {
-            (binding.endpoint.method == method &&
-                normalize_plugin_path(&binding.endpoint.path).ok().as_deref() == Some(normalized_path.as_str()))
-                .then_some(binding.plugin_name.as_str())
-        })
+        self.endpoints
+            .iter()
+            .find_map(|binding| {
+                (
+                    binding.endpoint.method == method &&
+                    normalize_plugin_path(&binding.endpoint.path).ok().as_deref() ==
+                        Some(normalized_path.as_str())
+                ).then_some(binding.plugin_name.as_str())
+            })
     }
 
     /// Returns the catalog binding for an HTTP endpoint.
@@ -921,10 +925,13 @@ impl PluginCatalog {
         path: &str
     ) -> Option<&PluginEndpointBinding> {
         let normalized_path = normalize_plugin_path(path).ok()?;
-        self.endpoints.iter().find(|binding| {
-            binding.endpoint.method == method &&
-                normalize_plugin_path(&binding.endpoint.path).ok().as_deref() == Some(normalized_path.as_str())
-        })
+        self.endpoints
+            .iter()
+            .find(|binding| {
+                binding.endpoint.method == method &&
+                    normalize_plugin_path(&binding.endpoint.path).ok().as_deref() ==
+                        Some(normalized_path.as_str())
+            })
     }
 
     pub fn endpoint_count(&self) -> usize {
@@ -1363,11 +1370,6 @@ fn is_reserved_route(normalized_path: &str) -> bool {
         "/persistlogfromui",
         "/openapi.json",
         "/docs",
-        "/gettablerowcount",
-        "/getpatientlist",
-        "/persistpatient",
-        "/gettablerowcounttest",
-        "/getpatientlisttest",
     ];
 
     RESERVED.contains(&normalized_path)
@@ -1383,7 +1385,8 @@ mod tests {
 
     #[test]
     fn rejects_removed_function_manifest_field() {
-        let json = r#"{
+        let json =
+            r#"{
             "contract_version": 7,
             "name": "LegacyPlugin",
             "version": "1.0.0",
@@ -1517,9 +1520,7 @@ mod tests {
         );
 
         let mut second = manifest("CompletelyDifferentName");
-        second.endpoints.push(
-            PluginEndpointDescriptor::get("beta-operation", "/getOtherRecord")
-        );
+        second.endpoints.push(PluginEndpointDescriptor::get("beta-operation", "/getOtherRecord"));
 
         let catalog = PluginCatalog::from_manifests([first, second]).unwrap();
 
@@ -1531,12 +1532,8 @@ mod tests {
             catalog.plugin_for_endpoint(PluginHttpMethod::Get, "/getOtherRecord"),
             Some("CompletelyDifferentName")
         );
-        assert_eq!(
-            catalog.plugin_for_endpoint(PluginHttpMethod::Post, "/getBusinessRecord"),
-            None
-        );
+        assert_eq!(catalog.plugin_for_endpoint(PluginHttpMethod::Post, "/getBusinessRecord"), None);
     }
-
 }
 
 #[cfg(test)]
