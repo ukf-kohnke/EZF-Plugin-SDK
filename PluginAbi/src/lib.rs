@@ -187,6 +187,22 @@ pub type PluginEndpointFnV2 = unsafe extern "C" fn(
     cancellation: PluginCancellationV2,
     response_out: *mut AbiBuffer
 ) -> i32;
+/// Optional append-only ABI V2 endpoint fast path.
+///
+/// The metadata buffer contains the usual JSON-encoded
+/// `Result<PluginEndpointResponse, PluginEndpointError>`, but a successful
+/// response's `body` is empty in that envelope. The original body bytes are
+/// returned separately, avoiding JSON-escaping and reparsing a potentially
+/// large response body. Both output buffers must be released with the plugin's
+/// `free_buffer` callback. This callback is exposed through
+/// [`PluginVTableV2Ext`] so older V2 plugins remain loadable.
+pub type PluginEndpointRawFnV2 = unsafe extern "C" fn(
+    context: *mut c_void,
+    request: AbiSlice,
+    cancellation: PluginCancellationV2,
+    metadata_out: *mut AbiBuffer,
+    body_out: *mut AbiBuffer
+) -> i32;
 pub type PluginDatabaseFnV2 = unsafe extern "C" fn(
     context: *mut c_void,
     request: AbiSlice,
@@ -276,6 +292,25 @@ impl PluginVTableV2 {
     }
 }
 
+/// Append-only extension for ABI V2 plugin tables.
+///
+/// Keep `PluginVTableV2` unchanged: a host only casts the vtable pointer to
+/// this extended layout after checking the advertised `struct_size`. This
+/// makes the endpoint fast path optional and preserves compatibility with
+/// plugins compiled before the extension was introduced.
+#[repr(C)]
+pub struct PluginVTableV2Ext {
+    pub base: PluginVTableV2,
+    pub handle_endpoint_raw: Option<PluginEndpointRawFnV2>,
+}
+
+impl PluginVTableV2Ext {
+    pub const fn is_compatible(&self) -> bool {
+        self.base.abi_version == PLUGIN_ABI_VERSION_V2 &&
+            self.base.struct_size >= (std::mem::size_of::<Self>() as u32)
+    }
+}
+
 /// Opaque plugin instance returned from the dynamic library.
 #[repr(C)]
 pub struct PluginInstanceV2 {
@@ -315,6 +350,15 @@ mod tests {
         assert_eq!(host.abi_version, PLUGIN_ABI_VERSION_V2);
         assert_eq!(host.struct_size as usize, size);
         assert!(host.is_compatible());
+    }
+
+    #[test]
+    fn endpoint_fast_path_extension_keeps_the_v2_vtable_prefix() {
+        assert_eq!(std::mem::offset_of!(PluginVTableV2Ext, base), 0);
+        assert!(
+            std::mem::size_of::<PluginVTableV2Ext>() > std::mem::size_of::<PluginVTableV2>(),
+            "the optional endpoint callback must be an append-only extension"
+        );
     }
 
     #[test]

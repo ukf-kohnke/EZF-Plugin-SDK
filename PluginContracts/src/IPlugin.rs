@@ -68,6 +68,28 @@ macro_rules! declare_plugin {
                 $crate::PluginAbi::PLUGIN_STATUS_OK
             }
 
+            fn write_json_and_body<T: ::serde::Serialize>(
+                metadata: &T,
+                body: ::std::vec::Vec<u8>,
+                metadata_out: *mut $crate::PluginAbi::AbiBuffer,
+                body_out: *mut $crate::PluginAbi::AbiBuffer,
+            ) -> i32 {
+                if metadata_out.is_null() || body_out.is_null() {
+                    return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
+                }
+
+                let metadata = match ::serde_json::to_vec(metadata) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return $crate::PluginAbi::PLUGIN_STATUS_SERIALIZATION,
+                };
+
+                unsafe {
+                    *metadata_out = $crate::PluginAbi::AbiBuffer::from_vec(metadata);
+                    *body_out = $crate::PluginAbi::AbiBuffer::from_vec(body);
+                }
+                $crate::PluginAbi::PLUGIN_STATUS_OK
+            }
+
             fn read_json<T: ::serde::de::DeserializeOwned>(
                 request: $crate::PluginAbi::AbiSlice,
             ) -> Result<T, i32> {
@@ -178,6 +200,63 @@ macro_rules! declare_plugin {
                     $crate::ApiContract::with_plugin_cancellation(cancellation, || {
                         let response = context.plugin.handle_endpoint(request, &cancellation);
                         write_json(&response, response_out)
+                    })
+                })) {
+                    Ok(status) => status,
+                    Err(_) => $crate::PluginAbi::PLUGIN_STATUS_PANIC,
+                }
+            }
+
+            unsafe extern "C" fn plugin_handle_endpoint_raw(
+                context: *mut ::std::ffi::c_void,
+                request: $crate::PluginAbi::AbiSlice,
+                cancellation: $crate::PluginAbi::PluginCancellationV2,
+                metadata_out: *mut $crate::PluginAbi::AbiBuffer,
+                body_out: *mut $crate::PluginAbi::AbiBuffer,
+            ) -> i32 {
+                if metadata_out.is_null() || body_out.is_null() {
+                    return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
+                }
+                unsafe {
+                    *metadata_out = $crate::PluginAbi::AbiBuffer::EMPTY;
+                    *body_out = $crate::PluginAbi::AbiBuffer::EMPTY;
+                }
+
+                match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                    let Some(context) = (unsafe { context_mut(context) }) else {
+                        return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
+                    };
+                    let request: $crate::ApiContract::PluginEndpointRequest =
+                        match read_json(request) {
+                            Ok(request) => request,
+                            Err(status) => return status,
+                        };
+                    let cancellation = convert_cancellation(cancellation);
+                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                        match context.plugin.handle_endpoint(request, &cancellation) {
+                            Ok(mut response) => {
+                                // Move the body out instead of serializing it into an escaped
+                                // JSON string and allocating it again on the host side.
+                                let body = ::std::mem::take(&mut response.body);
+                                let metadata: ::std::result::Result<
+                                    $crate::ApiContract::PluginEndpointResponse,
+                                    $crate::ApiContract::PluginEndpointError,
+                                > = Ok(response);
+                                write_json_and_body(&metadata, body, metadata_out, body_out)
+                            }
+                            Err(error) => {
+                                let metadata: ::std::result::Result<
+                                    $crate::ApiContract::PluginEndpointResponse,
+                                    $crate::ApiContract::PluginEndpointError,
+                                > = Err(error);
+                                write_json_and_body(
+                                    &metadata,
+                                    ::std::vec::Vec::new(),
+                                    metadata_out,
+                                    body_out,
+                                )
+                            }
+                        }
                     })
                 })) {
                     Ok(status) => status,
@@ -299,20 +378,23 @@ macro_rules! declare_plugin {
                 }
             }
 
-            static PLUGIN_VTABLE: $crate::PluginAbi::PluginVTableV2 =
-                $crate::PluginAbi::PluginVTableV2 {
-                    abi_version: $crate::PluginAbi::PLUGIN_ABI_VERSION_V2,
-                    struct_size: ::std::mem::size_of::<$crate::PluginAbi::PluginVTableV2>() as u32,
-                    name: plugin_name,
-                    manifest: plugin_manifest,
-                    on_load: plugin_on_load,
-                    is_loaded: plugin_is_loaded,
-                    handle_endpoint: plugin_handle_endpoint,
-                    execute_database: plugin_execute_database,
-                    on_session_closed: plugin_on_session_closed,
-                    on_unload: plugin_on_unload,
-                    free_buffer: plugin_free_buffer,
-                    destroy: plugin_destroy,
+            static PLUGIN_VTABLE: $crate::PluginAbi::PluginVTableV2Ext =
+                $crate::PluginAbi::PluginVTableV2Ext {
+                    base: $crate::PluginAbi::PluginVTableV2 {
+                        abi_version: $crate::PluginAbi::PLUGIN_ABI_VERSION_V2,
+                        struct_size: ::std::mem::size_of::<$crate::PluginAbi::PluginVTableV2Ext>() as u32,
+                        name: plugin_name,
+                        manifest: plugin_manifest,
+                        on_load: plugin_on_load,
+                        is_loaded: plugin_is_loaded,
+                        handle_endpoint: plugin_handle_endpoint,
+                        execute_database: plugin_execute_database,
+                        on_session_closed: plugin_on_session_closed,
+                        on_unload: plugin_on_unload,
+                        free_buffer: plugin_free_buffer,
+                        destroy: plugin_destroy,
+                    },
+                    handle_endpoint_raw: Some(plugin_handle_endpoint_raw),
                 };
 
             #[unsafe(no_mangle)]
@@ -360,7 +442,7 @@ macro_rules! declare_plugin {
                         abi_version: $crate::PluginAbi::PLUGIN_ABI_VERSION_V2,
                         struct_size: ::std::mem::size_of::<$crate::PluginAbi::PluginInstanceV2>() as u32,
                         context: context_ptr,
-                        vtable: &PLUGIN_VTABLE,
+                        vtable: &PLUGIN_VTABLE.base,
                     });
                     ::std::boxed::Box::into_raw(instance)
                 }));
