@@ -4,7 +4,7 @@
 /// It enforces versioning, naming conventions, and security constraints for plugin endpoints.
 ///
 /// # Plugin Contract Version
-/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (7)
+/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (8)
 /// - Maximum request body size: [`MAX_PLUGIN_REQUEST_BODY_BYTES`] (64 MiB)
 ///
 /// # Key Types
@@ -51,7 +51,7 @@ use std::{
     sync::{ atomic::{ AtomicBool, Ordering }, OnceLock },
 };
 
-pub const PLUGIN_CONTRACT_VERSION: u32 = 7;
+pub const PLUGIN_CONTRACT_VERSION: u32 = 8;
 pub const JSON_BODY_LIMIT: u64 = 2 * 1024 * 1024;
 pub const MAX_PLUGIN_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PLUGIN_OPENAPI_EXAMPLE_BYTES: usize = 128 * 1024;
@@ -689,6 +689,63 @@ impl fmt::Display for PluginLifecycleError {
 
 impl std::error::Error for PluginLifecycleError {}
 
+/// Compact JSON wire adapter for HTTP body bytes inside the plugin ABI envelope.
+///
+/// `serde_json` serializes an ordinary `Vec<u8>` as a JSON array of numbers. That is wasteful
+/// for JSON response bodies because the whole envelope crosses the dynamic-library boundary.
+/// Valid UTF-8 bodies are therefore represented as JSON strings; non-UTF-8 bodies retain the
+/// numeric-array representation. Deserialization accepts both forms so old captured fixtures
+/// and explicitly numeric payloads remain readable.
+mod plugin_body_serde {
+    use serde::{ de::{ SeqAccess, Visitor }, Deserializer, Serializer };
+    use std::fmt;
+
+    pub fn serialize<S>(body: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+        where S: Serializer
+    {
+        match std::str::from_utf8(body) {
+            Ok(text) => serializer.serialize_str(text),
+            Err(_) => serializer.serialize_bytes(body),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+        where D: Deserializer<'de>
+    {
+        struct BodyVisitor;
+
+        impl<'de> Visitor<'de> for BodyVisitor {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a UTF-8 body string or an array of byte values")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> where E: serde::de::Error {
+                Ok(value.as_bytes().to_vec())
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+                where E: serde::de::Error
+            {
+                Ok(value.into_bytes())
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+                where A: SeqAccess<'de>
+            {
+                let mut body = Vec::with_capacity(sequence.size_hint().unwrap_or(0));
+                while let Some(byte) = sequence.next_element::<u8>()? {
+                    body.push(byte);
+                }
+                Ok(body)
+            }
+        }
+
+        deserializer.deserialize_any(BodyVisitor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginEndpointRequest {
     pub endpoint_id: String,
@@ -697,6 +754,7 @@ pub struct PluginEndpointRequest {
     pub base_path: String,
     pub raw_query: Option<String>,
     pub content_type: Option<String>,
+    #[serde(with = "plugin_body_serde")]
     pub body: Vec<u8>,
     pub principal: PluginPrincipal,
 }
@@ -707,11 +765,16 @@ pub struct PluginHeader {
     pub value: String,
 }
 
+/// HTTP response from a plugin endpoint. Use JSON with status 200 for successful
+/// reads and explicit result payloads; use [`PluginEndpointResponse::no_content`]
+/// for successful commands that have no response representation. Failures must
+/// be returned as `PluginEndpointError`, not encoded in a success body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginEndpointResponse {
     pub status: u16,
     pub content_type: String,
     pub headers: Vec<PluginHeader>,
+    #[serde(with = "plugin_body_serde")]
     pub body: Vec<u8>,
 }
 
@@ -735,6 +798,20 @@ impl PluginEndpointResponse {
         })
     }
 
+    /// A successful command with no response representation.
+    ///
+    /// Mutation endpoints should use this instead of returning `200` with a JSON
+    /// `null` sentinel. Since there is no representation, the HTTP layer omits
+    /// the Content-Type header and body for the 204 response.
+    pub fn no_content() -> Self {
+        Self {
+            status: 204,
+            content_type: String::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
     pub fn redirect(location: impl Into<String>) -> Self {
         Self {
             status: 303,
@@ -748,6 +825,12 @@ impl PluginEndpointResponse {
     }
 }
 
+/// Standard error envelope for every dynamic plugin endpoint.
+///
+/// Plugin handlers must return this error through `Result::Err` so the dynamic
+/// API layer can preserve its HTTP status and serialize one consistent error
+/// shape. Do not represent operation failures as successful JSON bodies (for
+/// example `200` plus `null` or an error object).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginEndpointError {
     pub status: u16,
@@ -1384,10 +1467,59 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_response_body_uses_compact_utf8_wire_representation() {
+        let response = PluginEndpointResponse::json(
+            200,
+            &serde_json::json!({
+            "patients": [{ "id": "patient-1", "name": "Jörg" }]
+        })
+        ).expect("response body serializes");
+        let expected_body = response.body.clone();
+        let encoded = serde_json::to_vec(&response).expect("plugin response envelope serializes");
+        let wire: Value = serde_json::from_slice(&encoded).expect("wire envelope is valid JSON");
+
+        assert!(
+            wire["body"].is_string(),
+            "UTF-8 response bodies must not be encoded as byte-number arrays"
+        );
+        assert_eq!(wire["body"].as_str().unwrap().as_bytes(), expected_body.as_slice());
+
+        let decoded: PluginEndpointResponse = serde_json
+            ::from_slice(&encoded)
+            .expect("compact plugin response envelope deserializes");
+        assert_eq!(decoded.body, expected_body);
+    }
+
+    #[test]
+    fn endpoint_body_deserializer_still_accepts_legacy_numeric_arrays() {
+        let encoded =
+            br#"{"status":200,"content_type":"application/json","headers":[],"body":[123,34,120,34,58,49,125]}"#;
+        let decoded: PluginEndpointResponse = serde_json
+            ::from_slice(encoded)
+            .expect("legacy numeric-array body remains readable");
+        assert_eq!(decoded.body, br#"{"x":1}"#);
+    }
+
+    #[test]
+    fn non_utf8_endpoint_body_round_trips_as_bytes() {
+        let response = PluginEndpointResponse {
+            status: 200,
+            content_type: "application/octet-stream".to_owned(),
+            headers: Vec::new(),
+            body: vec![0, 255, 1, 128],
+        };
+        let encoded = serde_json::to_vec(&response).expect("binary response envelope serializes");
+        let decoded: PluginEndpointResponse = serde_json
+            ::from_slice(&encoded)
+            .expect("binary response envelope deserializes");
+        assert_eq!(decoded.body, response.body);
+    }
+
+    #[test]
     fn rejects_removed_function_manifest_field() {
         let json =
             r#"{
-            "contract_version": 7,
+            "contract_version": 8,
             "name": "LegacyPlugin",
             "version": "1.0.0",
             "kind": "Domain",
@@ -1412,7 +1544,7 @@ mod tests {
     #[test]
     fn rejects_plugin_override_of_static_master_data_route() {
         let mut plugin = manifest("BadPlugin");
-        plugin.endpoints.push(PluginEndpointDescriptor::get("patient", "/getPatientList"));
+        plugin.endpoints.push(PluginEndpointDescriptor::get("login", "/login"));
 
         let error = PluginCatalog::from_manifests([plugin]).unwrap_err();
         assert!(matches!(error, PluginCatalogError::ReservedRoute { .. }));
@@ -1534,6 +1666,31 @@ mod tests {
         );
         assert_eq!(catalog.plugin_for_endpoint(PluginHttpMethod::Post, "/getBusinessRecord"), None);
     }
+
+    #[test]
+    fn allows_patient_master_routes_after_domain_plugin_migration() {
+        let mut plugin = manifest("PatientMaster");
+        plugin.endpoints.extend([
+            PluginEndpointDescriptor::get("get-table-row-count", "/getTableRowCount"),
+            PluginEndpointDescriptor::get("get-patient-list", "/getPatientList"),
+            PluginEndpointDescriptor::post("persist-patient", "/persistPatient"),
+        ]);
+
+        let catalog = PluginCatalog::from_manifests([plugin]).unwrap();
+
+        assert_eq!(
+            catalog.plugin_for_endpoint(PluginHttpMethod::Get, "/getTableRowCount"),
+            Some("PatientMaster")
+        );
+        assert_eq!(
+            catalog.plugin_for_endpoint(PluginHttpMethod::Get, "/getPatientList"),
+            Some("PatientMaster")
+        );
+        assert_eq!(
+            catalog.plugin_for_endpoint(PluginHttpMethod::Post, "/persistPatient"),
+            Some("PatientMaster")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1556,5 +1713,19 @@ mod plugin_host_abi_tests {
         assert_eq!(services.version, PLUGIN_ABI_VERSION_V2);
         assert_eq!(services.plugin_directory(), Some(PathBuf::from("/plugins/MolgenDB")));
         assert!(services.database.is_none());
+    }
+}
+
+#[cfg(test)]
+mod endpoint_response_tests {
+    use super::PluginEndpointResponse;
+
+    #[test]
+    fn no_content_response_is_204_with_an_empty_body() {
+        let response = PluginEndpointResponse::no_content();
+        assert_eq!(response.status, 204);
+        assert!(response.content_type.is_empty());
+        assert!(response.body.is_empty());
+        assert!(response.headers.is_empty());
     }
 }
