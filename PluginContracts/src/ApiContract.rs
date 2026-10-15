@@ -1450,6 +1450,7 @@ fn is_reserved_route(normalized_path: &str) -> bool {
         "/getlogouturl",
         "/isauthenticated",
         "/version",
+        "/plugincatalog",
         "/persistlogfromui",
         "/openapi.json",
         "/docs",
@@ -1545,6 +1546,15 @@ mod tests {
     fn rejects_plugin_override_of_static_master_data_route() {
         let mut plugin = manifest("BadPlugin");
         plugin.endpoints.push(PluginEndpointDescriptor::get("login", "/login"));
+
+        let error = PluginCatalog::from_manifests([plugin]).unwrap_err();
+        assert!(matches!(error, PluginCatalogError::ReservedRoute { .. }));
+    }
+
+    #[test]
+    fn rejects_plugin_override_of_static_plugin_catalog_route() {
+        let mut plugin = manifest("BadPlugin");
+        plugin.endpoints.push(PluginEndpointDescriptor::get("catalog", "/pluginCatalog"));
 
         let error = PluginCatalog::from_manifests([plugin]).unwrap_err();
         assert!(matches!(error, PluginCatalogError::ReservedRoute { .. }));
