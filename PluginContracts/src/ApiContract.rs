@@ -825,6 +825,10 @@ impl PluginEndpointResponse {
     }
 }
 
+/// Stable status and code used when either API admission or PluginHost rejects saturated work.
+pub const PLUGIN_OVERLOADED_CODE: &str = "plugin_overloaded";
+pub const PLUGIN_OVERLOADED_USER_MESSAGE: &str = "The plugin dispatcher is at capacity";
+
 /// Standard error envelope for every dynamic plugin endpoint.
 ///
 /// Plugin handlers must return this error through `Result::Err` so the dynamic
