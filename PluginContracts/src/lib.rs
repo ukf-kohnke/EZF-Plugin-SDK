@@ -4,6 +4,7 @@
 //! It contains only the contract required by plugin implementations; plugin loading,
 //! lifecycle management and dynamic-library handling live in `PluginHost`.
 #![allow(non_snake_case)]
+pub use DatabaseContracts;
 pub use PluginAbi;
 
 pub mod ApiContract;
