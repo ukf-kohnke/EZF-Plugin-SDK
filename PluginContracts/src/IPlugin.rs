@@ -281,7 +281,7 @@ macro_rules! declare_plugin {
                     let Some(context) = (unsafe { context_ref(&context) }) else {
                         return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     };
-                    let request: ::DatabaseContracts::DatabaseRequest =
+                    let request: $crate::DatabaseContracts::DatabaseRequest =
                         match read_json(request) {
                             Ok(request) => request,
                             Err(status) => return status,
