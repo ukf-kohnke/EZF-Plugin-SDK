@@ -256,8 +256,8 @@ pub fn current_plugin_cancellation() -> Option<PluginCancellation> {
     ACTIVE_PLUGIN_CANCELLATION.with(|slot| slot.borrow().as_ref().copied())
 }
 
-struct DatabaseExecutorScope {
-    previous: Option<PluginDatabaseCapability>,
+pub struct DatabaseExecutorScope {
+    pub previous: Option<PluginDatabaseCapability>,
 }
 
 impl Drop for DatabaseExecutorScope {
@@ -281,7 +281,7 @@ pub fn database_executor() -> Option<PluginDatabaseCapability> {
     ACTIVE_DATABASE_EXECUTOR.with(|slot| slot.borrow().as_ref().copied())
 }
 
-unsafe extern "C" fn never_cancelled(_context: *const std::ffi::c_void) -> bool {
+pub unsafe extern "C" fn never_cancelled(_context: *const std::ffi::c_void) -> bool {
     false
 }
 
@@ -446,7 +446,7 @@ impl PluginQueryParameterDescriptor {
         Self::new(name, false)
     }
 
-    fn new(name: impl Into<String>, required: bool) -> Self {
+    pub fn new(name: impl Into<String>, required: bool) -> Self {
         Self {
             name: name.into(),
             required,
