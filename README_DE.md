@@ -48,7 +48,7 @@ Das Repository enthält mehrere unabhängige Versionskennungen. Sie haben unters
 
 | Kennung | Aktueller Wert | Bedeutung |
 | --- | ---: | --- |
-| Workspace-/Paketversion | `3.5.2` | Cargo-Paketversion dieses Checkouts. |
+| Workspace-/Paketversion | `1.0.0` | Cargo-Paketversion des eigenständigen Plugin-SDK-Workspaces. |
 | `PLUGIN_CONTRACT_VERSION` | `8` | Version des logischen Plugin-Manifest-/API-Vertrags. |
 | `PLUGIN_ABI_VERSION_V2` | `2` | Version der binären Plugin-ABI. |
 
@@ -104,7 +104,7 @@ Vermeide eine zweite, unabhängig aufgelöste Kopie von `DatabaseContracts` oder
 
 ### Als Submodule in EZF-Backend
 
-Das Backend kann dieses Repository als Git-Submodule (beispielsweise unter `Contracts/`) einbinden und für die integrierte Entwicklung lokale Pfadabhängigkeiten verwenden. Das Hauptrepository sollte das Submodule auf einen Commit pinnen, der mit den verwendeten Revisionen von `EZF-VariantFilter` und anderen Plugins kompatibel ist. Änderungen an gemeinsamen Typen sollten zusammen mit den betroffenen Plugins getestet werden.
+Das Backend bindet dieses Repository als Git-Submodul unter `Plugin-SDK/` ein und verwendet für die integrierte Entwicklung lokale Pfadabhängigkeiten. Das Hauptrepository sollte das Submodul auf einen Commit pinnen, der mit den verwendeten Revisionen von `EZF-VariantFilter` und anderen Plugins kompatibel ist. Änderungen an gemeinsamen Typen sollten zusammen mit den betroffenen Plugins getestet werden.
 
 ## Hinweise zur Kompatibilität
 

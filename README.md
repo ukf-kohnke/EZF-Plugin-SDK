@@ -48,7 +48,7 @@ The repository contains several independent version identifiers. They serve diff
 
 | Identifier | Current value | Meaning |
 | --- | ---: | --- |
-| Workspace/package version | `3.5.2` | Cargo package version declared by this checkout. |
+| Workspace/package version | `1.0.0` | Cargo package version declared by the standalone Plugin-SDK workspace. |
 | `PLUGIN_CONTRACT_VERSION` | `8` | Version of the logical plugin manifest/API contract. |
 | `PLUGIN_ABI_VERSION_V2` | `2` | Version of the binary plugin ABI. |
 
@@ -104,7 +104,7 @@ Avoid adding a second, independently resolved copy of `DatabaseContracts` or `Pl
 
 ### As a submodule in EZF-Backend
 
-The backend can include this repository as a Git submodule (for example, at `Contracts/`) and use local path dependencies for integrated development. The parent repository should pin the submodule to a commit compatible with the `EZF-VariantFilter` and other plugin revisions being built. Update and test the contracts and plugins together when changing shared types.
+The backend includes this repository as the `Plugin-SDK/` Git submodule and uses local path dependencies for integrated development. The parent repository should pin the submodule to a commit compatible with the `EZF-VariantFilter` and other plugin revisions being built. Update and test the contracts and plugins together when changing shared types.
 
 ## Compatibility guidance
 
