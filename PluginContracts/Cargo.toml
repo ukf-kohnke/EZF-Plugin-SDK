@@ -1,10 +1,9 @@
 [package]
 name = "PluginContracts"
-version = "1.0.0"
-edition = "2024"
-authors = ["Georg Kohnke <georg.kohnke@uniklinik-freiburg.de>"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Rust-side plugin SDK and logical plugin contracts"
-license = "MIT OR Apache-2.0"
 repository = "https://github.com/ukf-kohnke/EZF-Plugin-SDK.git"
 
 [dependencies]

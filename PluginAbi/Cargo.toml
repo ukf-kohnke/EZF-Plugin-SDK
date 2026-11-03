@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Stable C-compatible ABI primitives for EZF backend plugins"
+repository = "https://github.com/ukf-kohnke/EZF-Plugin-SDK.git"
 
 [lib]
 crate-type = ["rlib"]
