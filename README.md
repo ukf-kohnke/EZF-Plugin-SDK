@@ -48,11 +48,13 @@ The repository contains several independent version identifiers. They serve diff
 
 | Identifier | Current value | Meaning |
 | --- | ---: | --- |
-| Workspace/package version | `1.0.0` | Cargo package version declared by the standalone Plugin-SDK workspace. |
-| `PLUGIN_CONTRACT_VERSION` | `8` | Version of the logical plugin manifest/API contract. |
+| Workspace/package version | `1.0.1` | Cargo package version declared by the standalone Plugin-SDK workspace. |
+| `PLUGIN_CONTRACT_VERSION` | `9` | Current logical plugin manifest/API contract. The host also accepts contract version `8` for manifests without the optional `description` field. |
 | `PLUGIN_ABI_VERSION_V2` | `2` | Version of the binary plugin ABI. |
 
 The source code is the authority for these values. When changing the ABI layout, function signatures, buffer ownership rules, or cancellation semantics, assess compatibility with both the host and all affected plugins. Changes to serialized plugin contracts should likewise be validated against the host and plugin versions that will exchange them.
+
+Plugin manifests may include an optional `description` (up to 500 characters) for a concise, plain-text explanation of the plugin's functional responsibility. The field is omitted from serialized JSON when unset. The current host accepts legacy contract-v8 manifests that do not contain this field; plugins that provide the field must use contract version 9.
 
 ## Build and test
 

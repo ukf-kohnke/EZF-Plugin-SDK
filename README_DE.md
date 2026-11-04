@@ -48,11 +48,13 @@ Das Repository enthält mehrere unabhängige Versionskennungen. Sie haben unters
 
 | Kennung | Aktueller Wert | Bedeutung |
 | --- | ---: | --- |
-| Workspace-/Paketversion | `1.0.0` | Cargo-Paketversion des eigenständigen Plugin-SDK-Workspaces. |
-| `PLUGIN_CONTRACT_VERSION` | `8` | Version des logischen Plugin-Manifest-/API-Vertrags. |
+| Workspace-/Paketversion | `1.0.1` | Cargo-Paketversion des eigenständigen Plugin-SDK-Workspaces. |
+| `PLUGIN_CONTRACT_VERSION` | `9` | Aktuelle Version des logischen Plugin-Manifest-/API-Vertrags. Der Host akzeptiert zusätzlich Contract-Version `8` für Manifeste ohne das optionale Feld `description`. |
 | `PLUGIN_ABI_VERSION_V2` | `2` | Version der binären Plugin-ABI. |
 
 Maßgeblich sind die Werte im Quellcode. Bei Änderungen am ABI-Layout, an Funktionssignaturen, an der Pufferverwaltung oder am Cancellation-Verhalten muss die Kompatibilität mit dem Host und allen betroffenen Plugins geprüft werden. Änderungen an serialisierten Plugin-Verträgen müssen ebenfalls gegen die Versionen von Host und Plugins getestet werden, die Daten miteinander austauschen.
+
+Plugin-Manifeste können optional `description` enthalten (maximal 500 Zeichen). Das Feld dient einer knappen fachlichen Klartextbeschreibung der Plugin-Verantwortung und wird bei fehlendem Wert nicht serialisiert. Der aktuelle Host akzeptiert weiterhin ältere Manifeste mit Contract-Version 8, sofern sie dieses Feld nicht enthalten. Plugins, die `description` übertragen, verwenden Contract-Version 9.
 
 ## Bauen und testen
 

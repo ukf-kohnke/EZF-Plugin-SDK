@@ -4,7 +4,7 @@
 /// It enforces versioning, naming conventions, and security constraints for plugin endpoints.
 ///
 /// # Plugin Contract Version
-/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (8)
+/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (9)
 /// - Maximum request body size: [`MAX_PLUGIN_REQUEST_BODY_BYTES`] (64 MiB)
 ///
 /// # Key Types
@@ -24,7 +24,8 @@
 ///
 /// # Example
 /// ```ignore
-/// let mut plugin = PluginManifest::new("MyPlugin", "1.0.0", PluginKind::Domain);
+/// let mut plugin = PluginManifest::new("MyPlugin", "1.0.0", PluginKind::Domain)
+///     .with_description("Provides access to the domain data managed by this plugin.");
 /// plugin.endpoints.push(
 ///     PluginEndpointDescriptor::get("list", "/items")
 ///         .documented("Items", "List all items", Some("Returns a JSON array"))
@@ -51,7 +52,11 @@ use std::{
     sync::{ atomic::{ AtomicBool, Ordering }, OnceLock },
 };
 
-pub const PLUGIN_CONTRACT_VERSION: u32 = 8;
+pub const PLUGIN_CONTRACT_VERSION: u32 = 9;
+/// Oldest logical manifest contract version still accepted by this host.
+pub const MIN_SUPPORTED_PLUGIN_CONTRACT_VERSION: u32 = 8;
+/// Maximum length of the optional, plain-text plugin summary shown in API documentation.
+pub const MAX_PLUGIN_DESCRIPTION_CHARS: usize = 500;
 pub const JSON_BODY_LIMIT: u64 = 2 * 1024 * 1024;
 pub const MAX_PLUGIN_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PLUGIN_OPENAPI_EXAMPLE_BYTES: usize = 128 * 1024;
@@ -616,6 +621,8 @@ pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub kind: PluginKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub endpoints: Vec<PluginEndpointDescriptor>,
 }
 
@@ -626,8 +633,15 @@ impl PluginManifest {
             name: name.into(),
             version: version.into(),
             kind,
+            description: None,
             endpoints: Vec::new(),
         }
+    }
+
+    /// Sets the optional plain-text summary shown for this plugin in API documentation.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 
     pub fn without_api(name: impl Into<String>) -> Self {
@@ -1037,6 +1051,10 @@ pub enum PluginCatalogError {
     InvalidPluginVersion {
         plugin: String,
     },
+    InvalidPluginDescription {
+        plugin: String,
+        reason: String,
+    },
     DuplicatePlugin {
         plugin: String,
         existing: String,
@@ -1094,11 +1112,14 @@ impl fmt::Display for PluginCatalogError {
             Self::UnsupportedContractVersion { plugin, found, expected } =>
                 write!(
                     formatter,
-                    "plugin '{plugin}' uses contract version {found}, expected {expected}"
+                    "plugin '{plugin}' uses contract version {found}, supported range is {MIN_SUPPORTED_PLUGIN_CONTRACT_VERSION}..={expected}"
                 ),
             Self::InvalidPluginName => formatter.write_str("plugin name must not be empty"),
             Self::InvalidPluginVersion { plugin } => {
                 write!(formatter, "plugin '{plugin}' has no version")
+            }
+            Self::InvalidPluginDescription { plugin, reason } => {
+                write!(formatter, "plugin '{plugin}' has an invalid description: {reason}")
             }
             Self::DuplicatePlugin { plugin, existing } =>
                 write!(
@@ -1152,7 +1173,9 @@ impl fmt::Display for PluginCatalogError {
 impl std::error::Error for PluginCatalogError {}
 
 fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginCatalogError> {
-    if manifest.contract_version != PLUGIN_CONTRACT_VERSION {
+    if !(MIN_SUPPORTED_PLUGIN_CONTRACT_VERSION..=PLUGIN_CONTRACT_VERSION)
+        .contains(&manifest.contract_version)
+    {
         return Err(PluginCatalogError::UnsupportedContractVersion {
             plugin: manifest.name.clone(),
             found: manifest.contract_version,
@@ -1168,6 +1191,37 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginCatalogError
         return Err(PluginCatalogError::InvalidPluginVersion {
             plugin: manifest.name.clone(),
         });
+    }
+
+    if manifest.contract_version < PLUGIN_CONTRACT_VERSION && manifest.description.is_some() {
+        return Err(PluginCatalogError::InvalidPluginDescription {
+            plugin: manifest.name.clone(),
+            reason: "description requires manifest contract version 9".to_owned(),
+        });
+    }
+
+    if let Some(description) = manifest.description.as_deref() {
+        let trimmed = description.trim();
+        if trimmed.is_empty() {
+            return Err(PluginCatalogError::InvalidPluginDescription {
+                plugin: manifest.name.clone(),
+                reason: "description must not be empty".to_owned(),
+            });
+        }
+        if trimmed.chars().count() > MAX_PLUGIN_DESCRIPTION_CHARS {
+            return Err(PluginCatalogError::InvalidPluginDescription {
+                plugin: manifest.name.clone(),
+                reason: format!(
+                    "description must not exceed {MAX_PLUGIN_DESCRIPTION_CHARS} characters"
+                ),
+            });
+        }
+        if trimmed.chars().any(char::is_control) {
+            return Err(PluginCatalogError::InvalidPluginDescription {
+                plugin: manifest.name.clone(),
+                reason: "description must be single-line plain text".to_owned(),
+            });
+        }
     }
 
     Ok(())
@@ -1521,10 +1575,96 @@ mod tests {
     }
 
     #[test]
+    fn accepts_legacy_v8_manifest_without_optional_description() {
+        let json = r#"{
+            "contract_version": 8,
+            "name": "LegacyPlugin",
+            "version": "1.0.0",
+            "kind": "Domain",
+            "endpoints": []
+        }"#;
+
+        let parsed: PluginManifest = serde_json::from_str(json)
+            .expect("contract v8 manifest without description remains readable");
+        assert_eq!(parsed.description, None);
+        assert!(validate_manifest(&parsed).is_ok());
+        assert!(PluginCatalog::from_manifests([parsed]).is_ok());
+    }
+
+    #[test]
+    fn manifest_description_is_optional_and_omitted_when_unset() {
+        let manifest = PluginManifest::new("Example", "1.0.0", PluginKind::Domain);
+        let encoded = serde_json::to_value(&manifest).expect("manifest serializes");
+        assert!(encoded.get("description").is_none());
+
+        let described = PluginManifest::new("Example", "1.0.0", PluginKind::Domain)
+            .with_description("Provides access to patient master data.");
+        let encoded = serde_json::to_value(&described).expect("described manifest serializes");
+        assert_eq!(encoded["description"], "Provides access to patient master data.");
+        let decoded: PluginManifest = serde_json::from_value(encoded)
+            .expect("described manifest deserializes");
+        assert_eq!(decoded.description.as_deref(), Some("Provides access to patient master data."));
+    }
+
+    #[test]
+    fn accepts_contract_v8_and_v9_but_rejects_versions_outside_supported_range() {
+        for version in [8, 9] {
+            let mut manifest = manifest("SupportedPlugin");
+            manifest.contract_version = version;
+            assert!(validate_manifest(&manifest).is_ok(), "contract version {version} should be supported");
+        }
+
+        for version in [7, 10] {
+            let mut manifest = manifest("UnsupportedPlugin");
+            manifest.contract_version = version;
+            assert!(matches!(
+                validate_manifest(&manifest),
+                Err(PluginCatalogError::UnsupportedContractVersion { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_description_on_legacy_v8_manifest() {
+        let mut legacy = manifest("LegacyPluginWithDescription");
+        legacy.contract_version = 8;
+        legacy.description = Some("Description requires contract v9".to_owned());
+
+        assert!(matches!(
+            validate_manifest(&legacy),
+            Err(PluginCatalogError::InvalidPluginDescription { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_multiline_and_oversized_plugin_descriptions() {
+        let mut empty = manifest("EmptyDescription");
+        empty.description = Some("   ".to_owned());
+        assert!(matches!(
+            validate_manifest(&empty),
+            Err(PluginCatalogError::InvalidPluginDescription { .. })
+        ));
+
+        let mut multiline = manifest("MultilineDescription");
+        multiline.description = Some("first line\nsecond line".to_owned());
+        assert!(matches!(
+            validate_manifest(&multiline),
+            Err(PluginCatalogError::InvalidPluginDescription { .. })
+        ));
+
+        let mut oversized = manifest("OversizedDescription");
+        oversized.description = Some("x".repeat(MAX_PLUGIN_DESCRIPTION_CHARS + 1));
+        assert!(matches!(
+            validate_manifest(&oversized),
+            Err(PluginCatalogError::InvalidPluginDescription { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_removed_function_manifest_field() {
         let json =
             r#"{
-            "contract_version": 8,
+            "contract_version": 9,
             "name": "LegacyPlugin",
             "version": "1.0.0",
             "kind": "Domain",
