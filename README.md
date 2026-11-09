@@ -48,7 +48,7 @@ The repository contains several independent version identifiers. They serve diff
 
 | Identifier | Current value | Meaning |
 | --- | ---: | --- |
-| Workspace/package version | `1.0.1` | Cargo package version declared by the standalone Plugin-SDK workspace. |
+| Workspace/package version | `1.0.2` | Cargo package version declared by the standalone Plugin-SDK workspace. |
 | `PLUGIN_CONTRACT_VERSION` | `9` | Current logical plugin manifest/API contract. The host also accepts contract version `8` for manifests without the optional `description` field. |
 | `PLUGIN_ABI_VERSION_V2` | `2` | Version of the binary plugin ABI. |
 
@@ -106,7 +106,7 @@ Avoid adding a second, independently resolved copy of `DatabaseContracts` or `Pl
 
 ### As a submodule in EZF-Backend
 
-The backend includes this repository as the `Plugin-SDK/` Git submodule and uses local path dependencies for integrated development. The parent repository should pin the submodule to a commit compatible with the `EZF-VariantFilter` and other plugin revisions being built. Update and test the contracts and plugins together when changing shared types.
+The backend includes this repository as the nested Git submodule `Plugin-Platform/Plugin-SDK/`. Integrated backend crates use local path dependencies. In the backend root workspace, a root-level `[patch]` redirects the immutable SDK Git dependency pinned by `VariantFilter` to this same checked-out `PluginContracts` crate; its sibling path dependencies then resolve `DatabaseContracts` and `PluginAbi` from the same SDK checkout. Update the nested submodule and the independent plugin pin together when changing shared contracts.
 
 ## Compatibility guidance
 
