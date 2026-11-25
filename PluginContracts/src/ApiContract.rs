@@ -4,7 +4,7 @@
 /// It enforces versioning, naming conventions, and security constraints for plugin endpoints.
 ///
 /// # Plugin Contract Version
-/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (9)
+/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (10)
 /// - Maximum request body size: [`MAX_PLUGIN_REQUEST_BODY_BYTES`] (64 MiB)
 ///
 /// # Key Types
@@ -52,7 +52,9 @@ use std::{
     sync::{ atomic::{ AtomicBool, Ordering }, OnceLock },
 };
 
-pub const PLUGIN_CONTRACT_VERSION: u32 = 9;
+pub const PLUGIN_CONTRACT_VERSION: u32 = 10;
+/// First manifest contract version that supports endpoint authorization metadata.
+pub const PLUGIN_ENDPOINT_AUTHORIZATION_CONTRACT_VERSION: u32 = 10;
 /// Oldest logical manifest contract version still accepted by this host.
 pub const MIN_SUPPORTED_PLUGIN_CONTRACT_VERSION: u32 = 8;
 /// Maximum length of the optional, plain-text plugin summary shown in API documentation.
@@ -530,11 +532,30 @@ pub fn post(
         .documented(tag, summary, descr)
 }
 
+/// Describes the authorization requirement for an individual plugin endpoint.
+///
+/// Authentication is always required by the dynamic API runtime. `AuthenticatedOnly` means
+/// that a valid backend session is sufficient and no additional UMA permission check is made.
+/// `PermissionChecked` retains the normal resource/scope-based authorization flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginEndpointAuthorization {
+    /// A valid authenticated backend session is sufficient; skip the additional UMA check.
+    AuthenticatedOnly,
+    /// Require the normal resource/scope-based authorization check.
+    #[default]
+    PermissionChecked,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginEndpointDescriptor {
     pub id: String,
     pub method: PluginHttpMethod,
     pub path: String,
+    /// Authorization requirement for this endpoint. Missing fields in legacy manifests retain
+    /// the conservative `PermissionChecked` behavior.
+    #[serde(default)]
+    pub authorization: PluginEndpointAuthorization,
     pub consumes: Option<String>,
     pub produces: String,
     pub max_body_bytes: Option<u64>,
@@ -567,6 +588,7 @@ impl PluginEndpointDescriptor {
             id: id.into(),
             method,
             path: path.into(),
+            authorization: PluginEndpointAuthorization::PermissionChecked,
             consumes: None,
             produces: "application/json".to_owned(),
             max_body_bytes: None,
@@ -576,6 +598,15 @@ impl PluginEndpointDescriptor {
             summary: None,
             description: None,
         }
+    }
+
+    /// Declares that a valid authenticated session is sufficient for this endpoint.
+    ///
+    /// The backend still validates the session and user identity; only the additional UMA
+    /// permission check is skipped.
+    pub fn authenticated_only(mut self) -> Self {
+        self.authorization = PluginEndpointAuthorization::AuthenticatedOnly;
+        self
     }
 
     pub fn json_body(mut self, max_body_bytes: u64) -> Self {
@@ -1055,6 +1086,12 @@ pub enum PluginCatalogError {
         plugin: String,
         reason: String,
     },
+    UnsupportedEndpointAuthorization {
+        plugin: String,
+        endpoint_id: String,
+        found_contract_version: u32,
+        required_contract_version: u32,
+    },
     DuplicatePlugin {
         plugin: String,
         existing: String,
@@ -1121,6 +1158,15 @@ impl fmt::Display for PluginCatalogError {
             Self::InvalidPluginDescription { plugin, reason } => {
                 write!(formatter, "plugin '{plugin}' has an invalid description: {reason}")
             }
+            Self::UnsupportedEndpointAuthorization {
+                plugin,
+                endpoint_id,
+                found_contract_version,
+                required_contract_version,
+            } => write!(
+                formatter,
+                "plugin '{plugin}' endpoint '{endpoint_id}' declares authorization metadata requiring contract version {required_contract_version}, but uses version {found_contract_version}"
+            ),
             Self::DuplicatePlugin { plugin, existing } =>
                 write!(
                     formatter,
@@ -1193,11 +1239,24 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginCatalogError
         });
     }
 
-    if manifest.contract_version < PLUGIN_CONTRACT_VERSION && manifest.description.is_some() {
+    if manifest.contract_version < 9 && manifest.description.is_some() {
         return Err(PluginCatalogError::InvalidPluginDescription {
             plugin: manifest.name.clone(),
             reason: "description requires manifest contract version 9".to_owned(),
         });
+    }
+
+    if manifest.contract_version < PLUGIN_ENDPOINT_AUTHORIZATION_CONTRACT_VERSION {
+        if let Some(endpoint) = manifest.endpoints.iter().find(|endpoint| {
+            endpoint.authorization != PluginEndpointAuthorization::PermissionChecked
+        }) {
+            return Err(PluginCatalogError::UnsupportedEndpointAuthorization {
+                plugin: manifest.name.clone(),
+                endpoint_id: endpoint.id.clone(),
+                found_contract_version: manifest.contract_version,
+                required_contract_version: PLUGIN_ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
+            });
+        }
     }
 
     if let Some(description) = manifest.description.as_deref() {
@@ -1607,14 +1666,17 @@ mod tests {
     }
 
     #[test]
-    fn accepts_contract_v8_and_v9_but_rejects_versions_outside_supported_range() {
-        for version in [8, 9] {
+    fn accepts_contract_v8_v9_and_v10_but_rejects_versions_outside_supported_range() {
+        for version in [8, 9, 10] {
             let mut manifest = manifest("SupportedPlugin");
             manifest.contract_version = version;
-            assert!(validate_manifest(&manifest).is_ok(), "contract version {version} should be supported");
+            assert!(
+                validate_manifest(&manifest).is_ok(),
+                "contract version {version} should be supported"
+            );
         }
 
-        for version in [7, 10] {
+        for version in [7, 11] {
             let mut manifest = manifest("UnsupportedPlugin");
             manifest.contract_version = version;
             assert!(matches!(
@@ -1622,6 +1684,83 @@ mod tests {
                 Err(PluginCatalogError::UnsupportedContractVersion { .. })
             ));
         }
+    }
+
+    #[test]
+    fn endpoint_authorization_defaults_to_permission_checked_and_round_trips() {
+        let endpoint = PluginEndpointDescriptor::get("list", "/items");
+        assert_eq!(
+            endpoint.authorization,
+            PluginEndpointAuthorization::PermissionChecked
+        );
+
+        let authenticated = PluginEndpointDescriptor::get("list", "/items").authenticated_only();
+        assert_eq!(
+            authenticated.authorization,
+            PluginEndpointAuthorization::AuthenticatedOnly
+        );
+
+        let encoded = serde_json::to_value(&authenticated).expect("endpoint serializes");
+        assert_eq!(encoded["authorization"], "authenticated_only");
+        let decoded: PluginEndpointDescriptor = serde_json::from_value(encoded)
+            .expect("endpoint deserializes");
+        assert_eq!(
+            decoded.authorization,
+            PluginEndpointAuthorization::AuthenticatedOnly
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_without_authorization_keeps_permission_checked_default() {
+        let json = r#"{
+            "contract_version": 9,
+            "name": "LegacyPlugin",
+            "version": "1.0.0",
+            "kind": "Domain",
+            "endpoints": [{
+                "id": "list",
+                "method": "Get",
+                "path": "/items",
+                "consumes": null,
+                "produces": "application/json",
+                "max_body_bytes": null,
+                "request_body": null,
+                "query_parameters": [],
+                "tag": null,
+                "summary": null,
+                "description": null
+            }]
+        }"#;
+
+        let parsed: PluginManifest = serde_json::from_str(json)
+            .expect("legacy endpoint without authorization remains readable");
+        assert_eq!(
+            parsed.endpoints[0].authorization,
+            PluginEndpointAuthorization::PermissionChecked
+        );
+        assert!(PluginCatalog::from_manifests([parsed]).is_ok());
+    }
+
+    #[test]
+    fn rejects_authenticated_only_policy_on_contract_v9_manifest() {
+        let mut legacy = manifest("LegacyPlugin");
+        legacy.contract_version = 9;
+        legacy.endpoints.push(
+            PluginEndpointDescriptor::get("list", "/items").authenticated_only()
+        );
+
+        assert!(matches!(
+            validate_manifest(&legacy),
+            Err(PluginCatalogError::UnsupportedEndpointAuthorization { .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_plugin_description_on_contract_v9_after_contract_v10_introduction() {
+        let mut described = manifest("DescribedPlugin");
+        described.contract_version = 9;
+        described.description = Some("A legacy but valid description".to_owned());
+        assert!(validate_manifest(&described).is_ok());
     }
 
     #[test]
