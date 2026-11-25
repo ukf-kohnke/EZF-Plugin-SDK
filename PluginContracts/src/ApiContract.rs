@@ -4,7 +4,7 @@
 /// It enforces versioning, naming conventions, and security constraints for plugin endpoints.
 ///
 /// # Plugin Contract Version
-/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (10)
+/// - Current version: [`PLUGIN_CONTRACT_VERSION`] (11)
 /// - Maximum request body size: [`MAX_PLUGIN_REQUEST_BODY_BYTES`] (64 MiB)
 ///
 /// # Key Types
@@ -52,9 +52,11 @@ use std::{
     sync::{ atomic::{ AtomicBool, Ordering }, OnceLock },
 };
 
-pub const PLUGIN_CONTRACT_VERSION: u32 = 10;
+pub const PLUGIN_CONTRACT_VERSION: u32 = 11;
 /// First manifest contract version that supports endpoint authorization metadata.
 pub const PLUGIN_ENDPOINT_AUTHORIZATION_CONTRACT_VERSION: u32 = 10;
+/// First manifest contract version that supports process- and template-scoped UMA claims.
+pub const PLUGIN_ENDPOINT_SCOPED_AUTHORIZATION_CONTRACT_VERSION: u32 = 11;
 /// Oldest logical manifest contract version still accepted by this host.
 pub const MIN_SUPPORTED_PLUGIN_CONTRACT_VERSION: u32 = 8;
 /// Maximum length of the optional, plain-text plugin summary shown in API documentation.
@@ -536,15 +538,23 @@ pub fn post(
 ///
 /// Authentication is always required by the dynamic API runtime. `AuthenticatedOnly` means
 /// that a valid backend session is sufficient and no additional UMA permission check is made.
-/// `PermissionChecked` retains the normal resource/scope-based authorization flow.
+/// `PermissionChecked` checks the resource and scope without a process claim. `ProcessScoped`
+/// and `TemplateScoped` add process-specific UMA claims based on the endpoint query parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginEndpointAuthorization {
     /// A valid authenticated backend session is sufficient; skip the additional UMA check.
     AuthenticatedOnly,
-    /// Require the normal resource/scope-based authorization check.
+    /// Require the normal resource/scope-based authorization check without an additional
+    /// process claim.
     #[default]
     PermissionChecked,
+    /// Require UMA permission and include the process ID from the endpoint's `pid` query
+    /// parameter.
+    ProcessScoped,
+    /// Require UMA permission and include a template/process claim derived from `template`
+    /// and `pid`.
+    TemplateScoped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,6 +616,20 @@ impl PluginEndpointDescriptor {
     /// permission check is skipped.
     pub fn authenticated_only(mut self) -> Self {
         self.authorization = PluginEndpointAuthorization::AuthenticatedOnly;
+        self
+    }
+
+    /// Declares that UMA authorization must include the process ID supplied through `pid`.
+    pub fn process_scoped(mut self) -> Self {
+        self.authorization = PluginEndpointAuthorization::ProcessScoped;
+        self
+    }
+
+    /// Declares that UMA authorization must include a template/process claim.
+    /// When `template=true`, `pid` identifies the template; otherwise it identifies a process
+    /// value whose owning process is resolved by the backend before the claim is created.
+    pub fn template_scoped(mut self) -> Self {
+        self.authorization = PluginEndpointAuthorization::TemplateScoped;
         self
     }
 
@@ -1246,16 +1270,24 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginCatalogError
         });
     }
 
-    if manifest.contract_version < PLUGIN_ENDPOINT_AUTHORIZATION_CONTRACT_VERSION {
-        if let Some(endpoint) = manifest.endpoints.iter().find(|endpoint| {
-            endpoint.authorization != PluginEndpointAuthorization::PermissionChecked
-        }) {
-            return Err(PluginCatalogError::UnsupportedEndpointAuthorization {
-                plugin: manifest.name.clone(),
-                endpoint_id: endpoint.id.clone(),
-                found_contract_version: manifest.contract_version,
-                required_contract_version: PLUGIN_ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
-            });
+    for endpoint in &manifest.endpoints {
+        let required_contract_version = match endpoint.authorization {
+            PluginEndpointAuthorization::PermissionChecked => None,
+            PluginEndpointAuthorization::AuthenticatedOnly =>
+                Some(PLUGIN_ENDPOINT_AUTHORIZATION_CONTRACT_VERSION),
+            PluginEndpointAuthorization::ProcessScoped |
+            PluginEndpointAuthorization::TemplateScoped =>
+                Some(PLUGIN_ENDPOINT_SCOPED_AUTHORIZATION_CONTRACT_VERSION),
+        };
+        if let Some(required_contract_version) = required_contract_version {
+            if manifest.contract_version < required_contract_version {
+                return Err(PluginCatalogError::UnsupportedEndpointAuthorization {
+                    plugin: manifest.name.clone(),
+                    endpoint_id: endpoint.id.clone(),
+                    found_contract_version: manifest.contract_version,
+                    required_contract_version,
+                });
+            }
         }
     }
 
@@ -1666,8 +1698,8 @@ mod tests {
     }
 
     #[test]
-    fn accepts_contract_v8_v9_and_v10_but_rejects_versions_outside_supported_range() {
-        for version in [8, 9, 10] {
+    fn accepts_contract_v8_through_v11_but_rejects_versions_outside_supported_range() {
+        for version in [8, 9, 10, 11] {
             let mut manifest = manifest("SupportedPlugin");
             manifest.contract_version = version;
             assert!(
@@ -1676,7 +1708,7 @@ mod tests {
             );
         }
 
-        for version in [7, 11] {
+        for version in [7, 12] {
             let mut manifest = manifest("UnsupportedPlugin");
             manifest.contract_version = version;
             assert!(matches!(
@@ -1707,6 +1739,28 @@ mod tests {
         assert_eq!(
             decoded.authorization,
             PluginEndpointAuthorization::AuthenticatedOnly
+        );
+
+        let process_scoped = PluginEndpointDescriptor::get("by-process", "/items")
+            .process_scoped();
+        let encoded = serde_json::to_value(&process_scoped).expect("endpoint serializes");
+        assert_eq!(encoded["authorization"], "process_scoped");
+        let decoded: PluginEndpointDescriptor = serde_json::from_value(encoded)
+            .expect("process-scoped endpoint deserializes");
+        assert_eq!(
+            decoded.authorization,
+            PluginEndpointAuthorization::ProcessScoped
+        );
+
+        let template_scoped = PluginEndpointDescriptor::get("by-template", "/templates")
+            .template_scoped();
+        let encoded = serde_json::to_value(&template_scoped).expect("endpoint serializes");
+        assert_eq!(encoded["authorization"], "template_scoped");
+        let decoded: PluginEndpointDescriptor = serde_json::from_value(encoded)
+            .expect("template-scoped endpoint deserializes");
+        assert_eq!(
+            decoded.authorization,
+            PluginEndpointAuthorization::TemplateScoped
         );
     }
 
@@ -1753,6 +1807,38 @@ mod tests {
             validate_manifest(&legacy),
             Err(PluginCatalogError::UnsupportedEndpointAuthorization { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_scoped_authorization_policies_on_contract_v10_manifests() {
+        for endpoint in [
+            PluginEndpointDescriptor::get("by-process", "/items").process_scoped(),
+            PluginEndpointDescriptor::get("by-template", "/templates").template_scoped(),
+        ] {
+            let mut manifest = manifest("ScopedAuthorizationPlugin");
+            manifest.contract_version = 10;
+            manifest.endpoints.push(endpoint);
+
+            assert!(matches!(
+                validate_manifest(&manifest),
+                Err(PluginCatalogError::UnsupportedEndpointAuthorization {
+                    required_contract_version: PLUGIN_ENDPOINT_SCOPED_AUTHORIZATION_CONTRACT_VERSION,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn accepts_scoped_authorization_policies_on_contract_v11_manifests() {
+        let mut manifest = manifest("ScopedAuthorizationPlugin");
+        manifest.endpoints.push(
+            PluginEndpointDescriptor::get("by-process", "/items").process_scoped()
+        );
+        manifest.endpoints.push(
+            PluginEndpointDescriptor::get("by-template", "/templates").template_scoped()
+        );
+        assert!(validate_manifest(&manifest).is_ok());
     }
 
     #[test]

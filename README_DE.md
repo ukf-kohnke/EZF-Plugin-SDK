@@ -48,15 +48,15 @@ Das Repository enthält mehrere unabhängige Versionskennungen. Sie haben unters
 
 | Kennung | Aktueller Wert | Bedeutung |
 | --- | ---: | --- |
-| Workspace-/Paketversion | `1.0.2` | Cargo-Paketversion des eigenständigen Plugin-SDK-Workspaces. |
-| `PLUGIN_CONTRACT_VERSION` | `10` | Aktuelle Version des logischen Plugin-Manifest-/API-Vertrags. Der Host akzeptiert zusätzlich Contract-Version `8` und `9`; Endpoint-Autorisierungsmetadaten erfordern Contract-Version `10`. |
+| Workspace-/Paketversion | `1.0.3` | Cargo-Paketversion des eigenständigen Plugin-SDK-Workspaces. |
+| `PLUGIN_CONTRACT_VERSION` | `11` | Aktuelle Version des logischen Plugin-Manifest-/API-Vertrags. Der Host akzeptiert Versionen `8` bis `11`; `authenticated_only` erfordert Contract-Version `10`, prozess-/vorlagenbezogene Autorisierung Contract-Version `11`. |
 | `PLUGIN_ABI_VERSION_V2` | `2` | Version der binären Plugin-ABI. |
 
 Maßgeblich sind die Werte im Quellcode. Bei Änderungen am ABI-Layout, an Funktionssignaturen, an der Pufferverwaltung oder am Cancellation-Verhalten muss die Kompatibilität mit dem Host und allen betroffenen Plugins geprüft werden. Änderungen an serialisierten Plugin-Verträgen müssen ebenfalls gegen die Versionen von Host und Plugins getestet werden, die Daten miteinander austauschen.
 
 Plugin-Manifeste können optional `description` enthalten (maximal 500 Zeichen). Das Feld dient einer knappen fachlichen Klartextbeschreibung der Plugin-Verantwortung und wird bei fehlendem Wert nicht serialisiert. Manifeste mit Contract-Version 8 dürfen dieses Feld nicht enthalten; Plugins mit `description` müssen Contract-Version 9 oder höher verwenden.
 
-Jeder `PluginEndpointDescriptor` deklariert zusätzlich eine Autorisierungspolitik. `permission_checked` (Standardwert) behält die reguläre UMA-Berechtigungsprüfung bei. `authenticated_only` erfordert weiterhin eine gültige Backend-Session, überspringt aber die zusätzliche UMA-Prüfung. Manifeste mit dieser Endpoint-Metainformation müssen Contract-Version 10 verwenden. Bei älteren Endpunkten aus Contract-Version 8/9 ohne dieses Feld gilt aus Sicherheitsgründen `permission_checked`.
+Jeder `PluginEndpointDescriptor` deklariert zusätzlich eine Autorisierungspolitik. `permission_checked` (Standardwert) prüft Ressource und HTTP-Scope über UMA ohne zusätzlichen Prozess-Claim. `authenticated_only` erfordert weiterhin eine gültige Backend-Session, überspringt aber die zusätzliche UMA-Prüfung (Contract-Version 10). `process_scoped` ergänzt einen Claim aus dem Query-Parameter `pid`; `template_scoped` unterscheidet Vorlagen-IDs von Prozesswert-IDs und löst bei Bedarf den zugehörigen Prozess auf (Contract-Version 11). Ältere Endpunkte ohne dieses Feld verwenden weiterhin `permission_checked`.
 
 ## Bauen und testen
 

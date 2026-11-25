@@ -48,15 +48,15 @@ The repository contains several independent version identifiers. They serve diff
 
 | Identifier | Current value | Meaning |
 | --- | ---: | --- |
-| Workspace/package version | `1.0.2` | Cargo package version declared by the standalone Plugin-SDK workspace. |
-| `PLUGIN_CONTRACT_VERSION` | `10` | Current logical plugin manifest/API contract. The host also accepts contract versions `8` and `9`; endpoint authorization metadata requires contract version `10`. |
+| Workspace/package version | `1.0.3` | Cargo package version declared by the standalone Plugin-SDK workspace. |
+| `PLUGIN_CONTRACT_VERSION` | `11` | Current logical plugin manifest/API contract. The host accepts versions `8` through `11`; `authenticated_only` requires contract version `10`, while process/template-scoped authorization requires `11`. |
 | `PLUGIN_ABI_VERSION_V2` | `2` | Version of the binary plugin ABI. |
 
 The source code is the authority for these values. When changing the ABI layout, function signatures, buffer ownership rules, or cancellation semantics, assess compatibility with both the host and all affected plugins. Changes to serialized plugin contracts should likewise be validated against the host and plugin versions that will exchange them.
 
 Plugin manifests may include an optional `description` (up to 500 characters) for a concise, plain-text explanation of the plugin's functional responsibility. The field is omitted from serialized JSON when unset. Contract-v8 manifests must not contain this field; plugins that provide it must use contract version 9 or later.
 
-Each `PluginEndpointDescriptor` also declares an authorization policy. `permission_checked` (the default) retains the normal UMA permission check. `authenticated_only` still requires a valid backend session, but skips the additional UMA check. Manifests that declare this endpoint metadata must use contract version 10. Legacy contract-v8/v9 endpoints without the field default to `permission_checked`.
+Each `PluginEndpointDescriptor` also declares an authorization policy. `permission_checked` (the default) checks the resource and HTTP scope through UMA without an additional process claim. `authenticated_only` still requires a valid backend session, but skips the additional UMA check (contract v10). `process_scoped` adds a claim derived from the `pid` query parameter, while `template_scoped` distinguishes template IDs from process-value IDs and resolves the owning process when needed (contract v11). Legacy endpoints without the field default to `permission_checked`.
 
 ## Build and test
 
