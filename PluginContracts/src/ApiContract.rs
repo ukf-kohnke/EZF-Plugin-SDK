@@ -46,11 +46,13 @@ use serde::{ Deserialize, Serialize };
 use serde_json::Value;
 use std::{
     cell::RefCell,
+    future::Future,
     collections::{ BTreeMap, BTreeSet },
     fmt,
     path::PathBuf,
     sync::{ atomic::{ AtomicBool, Ordering }, OnceLock },
 };
+use uuid::Uuid;
 
 pub const PLUGIN_CONTRACT_VERSION: u32 = 11;
 /// First manifest contract version that supports endpoint authorization metadata.
@@ -198,7 +200,15 @@ impl log::Log for HostForwardingLogger {
             log::Level::Trace => PluginLogLevel::Trace,
         };
 
-        let message = format!("[{}] {}", record.target(), record.args());
+        let message = match current_request_correlation_id() {
+            Some(request_id) => format!(
+                "[{}] request_id={} {}",
+                record.target(),
+                request_id,
+                record.args()
+            ),
+            None => format!("[{}] {}", record.target(), record.args()),
+        };
         self.logger.log(level, &message);
     }
 
@@ -230,7 +240,17 @@ pub fn initialize_plugin_logging(host: PluginHostServices) -> bool {
     HOST_FORWARDING_LOGGER_INSTALLED.load(Ordering::Acquire)
 }
 
+tokio::task_local! {
+    /// Correlation inherited by asynchronous work inside a DataSource plugin. This is separate
+    /// from the thread-local scope because Tokio may poll a task on different worker threads.
+    static ASYNC_REQUEST_CORRELATION_ID: Uuid;
+}
+
 thread_local! {
+    static ACTIVE_REQUEST_CORRELATION_ID: RefCell<Option<Uuid>> = const {
+        RefCell::new(None)
+    };
+
     static ACTIVE_DATABASE_EXECUTOR: RefCell<Option<PluginDatabaseCapability>> = const {
         RefCell::new(None)
     };
@@ -238,6 +258,49 @@ thread_local! {
     static ACTIVE_PLUGIN_CANCELLATION: RefCell<Option<PluginCancellation>> = const {
         RefCell::new(None)
     };
+}
+
+struct RequestCorrelationScope {
+    previous: Option<Uuid>,
+}
+
+impl Drop for RequestCorrelationScope {
+    fn drop(&mut self) {
+        ACTIVE_REQUEST_CORRELATION_ID.with(|slot| {
+            let _ = slot.replace(self.previous.take());
+        });
+    }
+}
+
+/// Establishes a synchronous request-correlation scope for plugin callbacks and log records.
+pub fn with_request_correlation_id<T>(
+    request_id: Option<Uuid>,
+    operation: impl FnOnce() -> T
+) -> T {
+    let previous = ACTIVE_REQUEST_CORRELATION_ID.with(|slot| slot.replace(request_id));
+    let _scope = RequestCorrelationScope { previous };
+    operation()
+}
+
+/// Establishes a Tokio task-local correlation scope for async work executed by a plugin.
+pub async fn with_request_correlation_id_async<F>(
+    request_id: Option<Uuid>,
+    future: F
+) -> F::Output
+where
+    F: Future
+{
+    match request_id {
+        Some(request_id) => ASYNC_REQUEST_CORRELATION_ID.scope(request_id, future).await,
+        None => future.await,
+    }
+}
+
+/// Returns the current request ID from either the synchronous callback scope or async task scope.
+pub fn current_request_correlation_id() -> Option<Uuid> {
+    ACTIVE_REQUEST_CORRELATION_ID.with(|slot| *slot.borrow()).or_else(||
+        ASYNC_REQUEST_CORRELATION_ID.try_with(|request_id| *request_id).ok()
+    )
 }
 
 struct PluginCancellationScope {
@@ -299,8 +362,12 @@ pub fn execute_database(request: DatabaseRequest) -> Result<DatabaseResponse, Da
         return Err(DatabaseError::unsupported("plugin host does not expose database execution"));
     };
 
+    let capability_request = PluginDatabaseCapabilityRequest {
+        request_id: current_request_correlation_id(),
+        request,
+    };
     let request_bytes = serde_json
-        ::to_vec(&request)
+        ::to_vec(&capability_request)
         .map_err(|error|
             DatabaseError::new(
                 DatabaseContracts::DatabaseErrorKind::InvalidRequest,
@@ -817,6 +884,10 @@ mod plugin_body_serde {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginEndpointRequest {
+    /// Server-generated UUID v4 assigned by the HTTP request lifecycle.
+    /// `None` is retained for non-HTTP/test-host invocations and older serialized callers.
+    #[serde(default)]
+    pub request_id: Option<Uuid>,
     pub endpoint_id: String,
     pub method: PluginHttpMethod,
     pub raw_path: String,
@@ -826,6 +897,54 @@ pub struct PluginEndpointRequest {
     #[serde(with = "plugin_body_serde")]
     pub body: Vec<u8>,
     pub principal: PluginPrincipal,
+}
+
+/// Metadata adapter for database capability calls. Serialization keeps the original
+/// `DatabaseRequest` object at the top level and adds only an optional `request_id` field;
+/// the request ID remains outside the domain-neutral SQL contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginDatabaseCapabilityRequest {
+    pub request_id: Option<Uuid>,
+    pub request: DatabaseRequest,
+}
+
+// Keep the database request's existing wire representation intact: `request_id` is an
+// additional top-level field rather than a nested envelope. Older DataSource plugins deserialize
+// `DatabaseRequest` directly and ignore unknown fields, so they continue to accept this payload.
+impl Serialize for PluginDatabaseCapabilityRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        let mut value = serde_json::to_value(&self.request)
+            .map_err(serde::ser::Error::custom)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            serde::ser::Error::custom("database request must serialize to a JSON object")
+        })?;
+        if let Some(request_id) = self.request_id {
+            object.insert(
+                "request_id".to_owned(),
+                Value::String(request_id.to_string())
+            );
+        }
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PluginDatabaseCapabilityRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        let mut value = Value::deserialize(deserializer)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom("database capability request must be a JSON object")
+        })?;
+        let request_id: Option<Uuid> = match object.remove("request_id") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?
+            ),
+        };
+        let request = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self { request_id, request })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2069,6 +2188,98 @@ mod tests {
             catalog.plugin_for_endpoint(PluginHttpMethod::Post, "/persistPatient"),
             Some("PatientMaster")
         );
+    }
+}
+
+
+#[cfg(test)]
+mod request_correlation_tests {
+    use super::*;
+
+    #[test]
+    fn synchronous_request_correlation_scope_is_restored_after_nested_calls() {
+        let outer = Uuid::new_v4();
+        let inner = Uuid::new_v4();
+
+        with_request_correlation_id(Some(outer), || {
+            assert_eq!(current_request_correlation_id(), Some(outer));
+            with_request_correlation_id(Some(inner), || {
+                assert_eq!(current_request_correlation_id(), Some(inner));
+            });
+            assert_eq!(current_request_correlation_id(), Some(outer));
+        });
+
+        assert_eq!(current_request_correlation_id(), None);
+    }
+
+    #[test]
+    fn async_request_correlation_scope_is_visible_to_runtime_loggers() {
+        let request_id = Uuid::new_v4();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test Tokio runtime");
+
+        runtime.block_on(with_request_correlation_id_async(Some(request_id), async move {
+            assert_eq!(current_request_correlation_id(), Some(request_id));
+            tokio::task::yield_now().await;
+            assert_eq!(current_request_correlation_id(), Some(request_id));
+        }));
+    }
+
+    #[test]
+    fn endpoint_request_and_database_capability_keep_the_same_correlation_id() {
+        let request_id = Uuid::new_v4();
+        let endpoint_request = PluginEndpointRequest {
+            request_id: Some(request_id),
+            endpoint_id: "test".to_owned(),
+            method: PluginHttpMethod::Get,
+            raw_path: "/test".to_owned(),
+            base_path: String::new(),
+            raw_query: None,
+            content_type: None,
+            body: Vec::new(),
+            principal: PluginPrincipal {
+                user_id: "user".to_owned(),
+                username: "user".to_owned(),
+                given_name: String::new(),
+                family_name: String::new(),
+                groups: Vec::new(),
+                session_id: "session".to_owned(),
+            },
+        };
+        let encoded = serde_json::to_vec(&endpoint_request).unwrap();
+        let decoded: PluginEndpointRequest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.request_id, Some(request_id));
+
+        let database_request = PluginDatabaseCapabilityRequest {
+            request_id: Some(request_id),
+            request: DatabaseRequest::Query(DatabaseContracts::QueryRequest {
+                statement: "SELECT 1".to_owned(),
+                parameters: Vec::new(),
+                columns: Vec::new(),
+            }),
+        };
+        let encoded = serde_json::to_vec(&database_request).unwrap();
+        let decoded: PluginDatabaseCapabilityRequest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.request_id, Some(request_id));
+        assert_eq!(decoded.request, database_request.request);
+
+        let wire_value: Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(wire_value.get("operation").is_some());
+        assert!(wire_value.get("request").is_none());
+        let request_id_text = request_id.to_string();
+        assert_eq!(wire_value.get("request_id").and_then(Value::as_str), Some(request_id_text.as_str()));
+
+        // The extra top-level field is ignored by legacy DataSource plugins that still decode the
+        // original DatabaseRequest contract directly.
+        let legacy: DatabaseRequest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(legacy, decoded.request);
+
+        let raw_database_request = serde_json::to_vec(&database_request.request).unwrap();
+        let legacy_adapter: PluginDatabaseCapabilityRequest =
+            serde_json::from_slice(&raw_database_request).unwrap();
+        assert_eq!(legacy_adapter.request_id, None);
+        assert_eq!(legacy_adapter.request, database_request.request);
     }
 }
 

@@ -238,32 +238,35 @@ macro_rules! declare_plugin {
                             Ok(request) => request,
                             Err(status) => return status,
                         };
+                    let request_id = request.request_id;
                     let cancellation = convert_cancellation(cancellation);
-                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
-                        match context.read().handle_endpoint(request, &cancellation) {
-                            Ok(mut response) => {
-                                // Move the body out instead of serializing it into an escaped
-                                // JSON string and allocating it again on the host side.
-                                let body = ::std::mem::take(&mut response.body);
-                                let metadata: ::std::result::Result<
-                                    $crate::ApiContract::PluginEndpointResponse,
-                                    $crate::ApiContract::PluginEndpointError,
-                                > = Ok(response);
-                                write_json_and_body(&metadata, body, metadata_out, body_out)
+                    $crate::ApiContract::with_request_correlation_id(request_id, || {
+                        $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                            match context.read().handle_endpoint(request, &cancellation) {
+                                Ok(mut response) => {
+                                    // Move the body out instead of serializing it into an escaped
+                                    // JSON string and allocating it again on the host side.
+                                    let body = ::std::mem::take(&mut response.body);
+                                    let metadata: ::std::result::Result<
+                                        $crate::ApiContract::PluginEndpointResponse,
+                                        $crate::ApiContract::PluginEndpointError,
+                                    > = Ok(response);
+                                    write_json_and_body(&metadata, body, metadata_out, body_out)
+                                }
+                                Err(error) => {
+                                    let metadata: ::std::result::Result<
+                                        $crate::ApiContract::PluginEndpointResponse,
+                                        $crate::ApiContract::PluginEndpointError,
+                                    > = Err(error);
+                                    write_json_and_body(
+                                        &metadata,
+                                        ::std::vec::Vec::new(),
+                                        metadata_out,
+                                        body_out,
+                                    )
+                                }
                             }
-                            Err(error) => {
-                                let metadata: ::std::result::Result<
-                                    $crate::ApiContract::PluginEndpointResponse,
-                                    $crate::ApiContract::PluginEndpointError,
-                                > = Err(error);
-                                write_json_and_body(
-                                    &metadata,
-                                    ::std::vec::Vec::new(),
-                                    metadata_out,
-                                    body_out,
-                                )
-                            }
-                        }
+                        })
                     })
                 })) {
                     Ok(status) => status,
@@ -281,15 +284,25 @@ macro_rules! declare_plugin {
                     let Some(context) = (unsafe { context_ref(&context) }) else {
                         return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT;
                     };
-                    let request: $crate::DatabaseContracts::DatabaseRequest =
-                        match read_json(request) {
-                            Ok(request) => request,
-                            Err(status) => return status,
-                        };
+                    let request_bytes = match unsafe { request.to_vec() } {
+                        Some(bytes) => bytes,
+                        None => return $crate::PluginAbi::PLUGIN_STATUS_INVALID_ARGUMENT,
+                    };
+                    let (request_id, database_request) = match
+                        ::serde_json::from_slice::<$crate::ApiContract::PluginDatabaseCapabilityRequest>(&request_bytes)
+                    {
+                        Ok(envelope) => (envelope.request_id, envelope.request),
+                        Err(_) => match ::serde_json::from_slice::<$crate::DatabaseContracts::DatabaseRequest>(&request_bytes) {
+                            Ok(legacy_request) => (None, legacy_request),
+                            Err(_) => return $crate::PluginAbi::PLUGIN_STATUS_SERIALIZATION,
+                        },
+                    };
                     let cancellation = convert_cancellation(cancellation);
-                    $crate::ApiContract::with_plugin_cancellation(cancellation, || {
-                        let response = context.read().execute_database(request, &cancellation);
-                        write_json(&response, response_out)
+                    $crate::ApiContract::with_request_correlation_id(request_id, || {
+                        $crate::ApiContract::with_plugin_cancellation(cancellation, || {
+                            let response = context.read().execute_database(database_request, &cancellation);
+                            write_json(&response, response_out)
+                        })
                     })
                 })) {
                     Ok(status) => status,
